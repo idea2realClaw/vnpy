@@ -38,8 +38,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def get_bars(source: str):
     """返回训练用的 BarData 列表（策略只用其中的收盘价）。"""
     if source.upper() == "HSI":
-        import fetch_hsi
-        return fetch_hsi.fetch_bars()
+        # yfinance 全历史（2016 起），覆盖 sina 旧子集，支持 2016+ 训练
+        import fetch_hsi_yf
+        return fetch_hsi_yf.fetch_bars()
     if source.upper() == "CSI300":
         import fetch_csi300
         return fetch_csi300.fetch_bars()

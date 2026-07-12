@@ -39,7 +39,7 @@ MODEL_PATH = os.path.join(HERE, "rf_model.joblib")
 
 PRESETS = {
     "CSI300": {"symbol": "000300", "exchange": Exchange.SSE, "source": "csi300", "name": "沪深300"},
-    "HSI": {"symbol": "HSI", "exchange": Exchange.SEHK, "source": "hsi", "name": "恒生指数"},
+    "HSI": {"symbol": "HSI", "exchange": Exchange.SEHK, "source": "hsi_yf", "name": "恒生指数"},
 }
 
 
@@ -56,6 +56,9 @@ def ensure_data(cfg: dict) -> None:
     elif src == "hsi":
         import fetch_hsi
         fetch_hsi.main()
+    elif src == "hsi_yf":
+        import fetch_hsi_yf
+        fetch_hsi_yf.main()
     elif src == "akshare_index":
         import akshare as ak
         ak_code = cfg["ak_code"]
