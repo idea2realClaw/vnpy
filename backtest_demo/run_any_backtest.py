@@ -25,6 +25,7 @@ import sys
 from datetime import datetime, timezone
 
 import pandas as pd
+import numpy as np
 from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.database import get_database
 from vnpy.trader.object import BarData
@@ -95,15 +96,55 @@ def build_cfg(args) -> dict:
     raise SystemExit("请指定 --target CSI300/HSI 或 --ak-code <新浪指数代码>")
 
 
-def run_backtest(cfg: dict) -> None:
+def compute_window_stats(df: pd.DataFrame, test_start_dt: datetime):
+    """在测试区间 [test_start_dt, 今] 上计算无泄漏绩效（样本外）。"""
+    # daily_df 的 index 可能是 datetime.date 对象，统一转成 Timestamp 便于比较
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+    d = df[df.index >= test_start_dt].copy()
+    if d.empty or len(d) < 2:
+        return None
+    bal0, bal1 = float(d["balance"].iloc[0]), float(d["balance"].iloc[-1])
+    total_ret = bal1 / bal0 - 1.0
+    days = (d.index[-1] - d.index[0]).days
+    annual = (1.0 + total_ret) ** (365.0 / days) - 1.0 if days > 0 else 0.0
+    rets = d["balance"].pct_change().dropna()
+    sharpe = float(rets.mean() / rets.std() * np.sqrt(252)) if len(rets) > 1 and rets.std() > 0 else 0.0
+    dd_col = "ddpercent" if "ddpercent" in d.columns else ("drawdown" if "drawdown" in d.columns else None)
+    max_dd = float(d[dd_col].min()) if dd_col else 0.0
+    if abs(max_dd) < 1:  # 可能是比率而非百分比
+        max_dd *= 100.0
+    prev = d["end_pos"].shift(1).fillna(0)
+    entries = int(((prev == 0) & (d["end_pos"] != 0)).sum())
+    hold_ret = float(d["close_price"].iloc[-1] / d["close_price"].iloc[0] - 1.0)
+    return {
+        "start": d.index[0], "end": d.index[-1],
+        "total_return": total_ret * 100.0, "annual_return": annual * 100.0,
+        "sharpe_ratio": sharpe, "max_ddpercent": max_dd,
+        "entries": entries, "hold_return": hold_ret * 100.0,
+    }
+
+
+def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None) -> None:
     vt_symbol = f"{cfg['symbol']}.{cfg['exchange'].value}"
     name = cfg["name"]
-    print(f"\n===== 固定模型回测：{name} ({vt_symbol}) =====")
+    test_start_dt = None
+    if test_start:
+        test_start_dt = datetime.strptime(test_start, "%Y-%m-%d")
+        # 预热：测试起点前 2 年数据仅用于构造首批特征，不计入交易，杜绝未来函数
+        warmup_start = datetime(test_start_dt.year - 2, test_start_dt.month, test_start_dt.day)
+        bt_start = warmup_start
+        print(f"\n===== 固定模型回测（train/test 切分）：{name} ({vt_symbol}) =====")
+        print(f"测试区间 = {test_start} ~ 今；预热数据 {warmup_start.date()} 起（仅构造特征，不交易）")
+    else:
+        bt_start = datetime(2022, 1, 1)
+        print(f"\n===== 固定模型回测：{name} ({vt_symbol}) =====")
 
     engine = BacktestingEngine()
     engine.set_parameters(
         vt_symbol=vt_symbol, interval=Interval.DAILY,
-        start=datetime(2022, 1, 1), end=datetime.now(),
+        start=bt_start, end=datetime.now(),
         rate=0.0, slippage=0.0, size=1, pricetick=0.01, capital=1_000_000,
     )
     engine.add_strategy(
@@ -113,7 +154,8 @@ def run_backtest(cfg: dict) -> None:
             "retrain_interval": 20, "threshold": 0.5,
             "allow_short": False, "target_percent": 1.0,
             "stop_loss_pct": 0.05, "trailing_pct": 0.05,
-            "fixed_model": True, "model_path": MODEL_PATH,
+            "fixed_model": True, "model_path": model_path,
+            "trade_start": test_start or "",
         },
     )
     engine.load_data()
@@ -144,7 +186,10 @@ def run_backtest(cfg: dict) -> None:
             rows=2, cols=1, shared_xaxes=True,
             row_heights=[0.7, 0.3], vertical_spacing=0.08,
             specs=[[{}], [{}]],
-            subplot_titles=(f"{name}（固定模型，归一化=100）", ""),
+            subplot_titles=(
+                f"{name}（固定模型，{'样本外测试 ' + test_start + ' 起，' if test_start else ''}归一化=100）",
+                "",
+            ),
         )
         fig.add_trace(
             go.Scatter(x=x_dates, y=capital_idx, name="策略资金净值",
@@ -177,6 +222,11 @@ def run_backtest(cfg: dict) -> None:
                            text="持仓", showarrow=False,
                            font=dict(size=13, color="#2ca02c"))
         fig.update_layout(title=f"{name} AI 固定模型回测 {vt_symbol}", height=650)
+        if test_start_dt is not None:
+            fig.add_vline(
+                x=test_start_dt, line_dash="dash", line_color="#d62728",
+                annotation_text="测试起点", annotation_position="top left",
+            )
         html_path = os.path.join(HERE, f"frozen_{cfg['symbol']}_chart.html")
         fig.write_html(html_path)
 
@@ -194,7 +244,7 @@ def run_backtest(cfg: dict) -> None:
             )
         table_html = (
             "<div style='margin:10px 0 18px 0;font-family:sans-serif;'>"
-            f"<h3 style='margin:0 0 6px 0;'>{name} 最近一周持仓（固定模型）</h3>"
+            f"<h3 style='margin:0 0 6px 0;'>{name} 最近一周持仓（固定模型{('·样本外 ' + test_start) if test_start else ''}）</h3>"
             "<table border='1' cellpadding='6' cellspacing='0' "
             "style='border-collapse:collapse;font-size:13px;'>"
             "<thead><tr style='background:#f2f2f2;'>"
@@ -212,28 +262,49 @@ def run_backtest(cfg: dict) -> None:
 
     # 同时给出“买入持有”基准，便于对比固定模型是否跑赢
     hold_ret = (df["close_price"].iloc[-1] / df["close_price"].iloc[0] - 1) * 100
-    print("\n===== 绩效统计 =====")
+    print("\n===== 绩效统计（全区间，含预热） =====")
     for k, v in (stats or {}).items():
         print(f"{k}: {v}")
-    print(f"\n[{name}] 买入持有基准收益: {hold_ret:.2f}%")
+    print(f"\n[{name}] 买入持有基准收益(全区间): {hold_ret:.2f}%")
 
+    if test_start_dt is not None:
+        w = compute_window_stats(df, test_start_dt)
+        if w:
+            print(f"\n===== 样本外测试区间绩效（{w['start'].date()} ~ {w['end'].date()}，无未来函数） =====")
+            print(f"策略总收益:   {w['total_return']:8.2f}%")
+            print(f"年化收益:     {w['annual_return']:8.2f}%")
+            print(f"Sharpe:       {w['sharpe_ratio']:8.3f}")
+            print(f"最大回撤:     {w['max_ddpercent']:8.2f}%")
+            print(f"入场次数:     {w['entries']}")
+            print(f"买入持有基准: {w['hold_return']:8.2f}%")
+            print(f"超额收益:     {w['total_return'] - w['hold_return']:8.2f}%")
     return stats
 
 
 def main() -> None:
-    if not os.path.exists(MODEL_PATH):
-        raise SystemExit(f"未找到固定模型 {MODEL_PATH}，请先运行 train_model.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", default="CSI300", help="预设标的: CSI300 / HSI")
     ap.add_argument("--ak-code", default=None, help="自定义指数新浪代码, 如 sh000016")
     ap.add_argument("--symbol", default=None, help="vnpy 标的代码, 如 000016")
     ap.add_argument("--exchange", default=None, choices=["SSE", "SZSE", "SEHK"])
     ap.add_argument("--name", default=None, help="显示名称")
+    ap.add_argument("--model", default=None, help="固定模型路径（默认 rf_model.joblib）")
+    ap.add_argument(
+        "--test-start", default=None,
+        help="样本外测试起点 (YYYY-MM-DD)。指定后仅用该日及之后做推理/交易，"
+             "之前的数据作预热（模型已冻结，绝不训练）。对应 train_model.py 的 --train-end。",
+    )
     args = ap.parse_args()
+
+    model_path = MODEL_PATH
+    if args.model:
+        model_path = args.model if os.path.isabs(args.model) else os.path.join(HERE, args.model)
+    if not os.path.exists(model_path):
+        raise SystemExit(f"未找到固定模型 {model_path}，请先运行 train_model.py")
 
     cfg = build_cfg(args)
     ensure_data(cfg)
-    run_backtest(cfg)
+    run_backtest(cfg, model_path=model_path, test_start=args.test_start)
 
 
 if __name__ == "__main__":

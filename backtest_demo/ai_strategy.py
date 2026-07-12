@@ -14,6 +14,7 @@
 依赖：numpy（已装）、scikit-learn（需 pip install scikit-learn）。
 """
 
+import datetime
 import numpy as np
 
 from vnpy_ctastrategy import (
@@ -137,6 +138,7 @@ class AIStrategy(CtaTemplate):
     trailing_pct = 0.05    # 追踪止损幅度：盈利后止损价随高点(低点)上(下)移锁利润；设 0 退化为固定止损
     fixed_model = True     # True=加载冻结模型，不再重训（固定参数、跨标的推理）
     model_path = "rf_model.joblib"  # 固定模型文件（相对 ai_strategy.py 所在目录，或绝对路径）
+    trade_start = ""       # 样本外测试起点 (YYYY-MM-DD)；留空=不限制。该日之前只预热积累特征、不交易
 
     # 变量
     p_up = 0.0
@@ -151,7 +153,7 @@ class AIStrategy(CtaTemplate):
     parameters = [
         "lookback", "horizon", "min_train", "retrain_interval",
         "threshold", "allow_short", "target_percent", "fixed_size",
-        "stop_loss_pct", "trailing_pct", "fixed_model", "model_path",
+        "stop_loss_pct", "trailing_pct", "fixed_model", "model_path", "trade_start",
     ]
     variables = [
         "p_up", "target_volume", "model_trained", "entry_price",
@@ -164,6 +166,7 @@ class AIStrategy(CtaTemplate):
         self.model = None
         self.bars_since_train = 0
         self.n_features_ = 0
+        self.trade_start_dt = None
         self.am = ArrayManager()
         self.entry_price = 0.0
         self.peak_price = 0.0
@@ -183,6 +186,16 @@ class AIStrategy(CtaTemplate):
 
     def on_init(self):
         self.write_log("AI 策略初始化")
+        # 解析样本外测试起点（该日之前只预热、不交易）
+        if getattr(self, "trade_start", ""):
+            try:
+                self.trade_start_dt = datetime.datetime.strptime(
+                    self.trade_start, "%Y-%m-%d"
+                )
+                self.write_log(f"样本外测试起点: {self.trade_start}（之前仅预热）")
+            except ValueError:
+                self.trade_start_dt = None
+                self.write_log(f"trade_start 格式错误，忽略: {self.trade_start}")
         # 固定模型模式：在回测开始前一次性加载冻结模型，运行期不再重训
         if self.fixed_model:
             self._load_model()
@@ -291,6 +304,12 @@ class AIStrategy(CtaTemplate):
         proba = self.model.predict_proba(feat.reshape(1, -1))[0]
         self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
         signal_up = self.p_up >= self.threshold
+
+        # 样本外测试起点之前：仅预热，不参与交易（杜绝用测试期数据做决策/训练）
+        if self.trade_start_dt is not None:
+            bd = bar.datetime.replace(tzinfo=None) if getattr(bar.datetime, "tzinfo", None) else bar.datetime
+            if bd < self.trade_start_dt:
+                return
 
         vol = self.get_target_volume(bar.close_price)
         if signal_up:
