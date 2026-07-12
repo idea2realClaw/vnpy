@@ -9,6 +9,13 @@
 亏损超过初始止损线 stop_loss_pct 立即平仓。trailing_pct 控制盈利后回撤容忍度，
 追踪逻辑优先级高于模型信号。
 
+仓位（核心改动）：不再用“满仓/空仓”两档，而是按凯利公式根据模型推理出的上涨概率 p
+计算目标仓位比例：target% = kelly_scale * (p - (1-p)) = kelly_scale * (2p - 1)。
+- p > 0.5 做多，p 越大仓位越重；p = 0.5 空仓；p < 0.5 在 allow_short=False 时空仓，
+  在 allow_short=True 时反手做空（仓位 = p-(1-p) 可为负）。
+- max_position 限制单标的仓位上限；kelly_scale 缩放（1.0=满凯利，0.5=半凯利）。
+- 仓位以“占总权益百分比”为准，按当前权益动态换算手数，每日随信号上调/下调/平仓。
+
 默认多头-only（不允许做空，符合原需求）；设置 allow_short=True 可开启双向。
 
 依赖：numpy（已装）、scikit-learn（需 pip install scikit-learn）。
@@ -16,6 +23,8 @@
 
 import datetime
 import numpy as np
+
+from vnpy.trader.constant import Direction
 
 from vnpy_ctastrategy import (
     CtaTemplate,
@@ -121,7 +130,7 @@ def make_dataset(prices: np.ndarray, lookback: int, horizon: int):
 
 
 class AIStrategy(CtaTemplate):
-    """随机森林 AI 择时策略（0% 空仓 / 100% 满仓多头，可开双向，带追踪止损）"""
+    """随机森林 AI 择时策略（凯利百分比仓位：target% = kelly_scale*(p_up-(1-p_up))，带追踪止损）"""
 
     author = "demo-ai"
 
@@ -131,9 +140,9 @@ class AIStrategy(CtaTemplate):
     min_train = 250        # 至少积累这么多根才开始交易
     retrain_interval = 20  # 每多少根 bar 滚动重训一次
     threshold = 0.5        # 涨概率阈值
-    allow_short = False    # 是否允许做空（默认 False）
-    target_percent = 1.0
-    fixed_size = 1
+    allow_short = False    # 是否允许做空（默认 False）；False 时 p<=0.5 直接空仓
+    kelly_scale = 1.0      # 凯利系数缩放：仓位 = kelly_scale*(p-(1-p))；1.0=满凯利，0.5=半凯利
+    max_position = 1.0     # 单标的仓位上限（占总权益比例），1.0=不封顶
     stop_loss_pct = 0.05   # 初始止损线：开仓后允许的最大浮亏（多头 below entry*(1-sl)，空头 above entry*(1+sl)）
     trailing_pct = 0.05    # 追踪止损幅度：盈利后止损价随高点(低点)上(下)移锁利润；设 0 退化为固定止损
     fixed_model = True     # True=加载冻结模型，不再重训（固定参数、跨标的推理）
@@ -142,21 +151,24 @@ class AIStrategy(CtaTemplate):
 
     # 变量
     p_up = 0.0
-    target_volume = 0
+    target_pct = 0.0       # 当前目标仓位比例（占总权益）
     model_trained = 0
     n_features_ = 0        # 冻结模型期望的特征维数
-    entry_price = 0.0      # 当前持仓开仓参考价
+    entry_price = 0.0      # 当前持仓开仓参考价（= avg_cost）
     peak_price = 0.0       # 持仓期间跟踪的高点（多头用）
     trough_price = 0.0     # 持仓期间跟踪的低点（空头用）
     stop_price = 0.0       # 当前生效的止损价（追踪动态更新）
+    equity0 = 0.0          # 初始权益（用于按百分比换算手数）
+    realized_pnl = 0.0     # 累计已实现盈亏
+    avg_cost = 0.0         # 当前持仓加权成本价
 
     parameters = [
         "lookback", "horizon", "min_train", "retrain_interval",
-        "threshold", "allow_short", "target_percent", "fixed_size",
+        "threshold", "allow_short", "kelly_scale", "max_position",
         "stop_loss_pct", "trailing_pct", "fixed_model", "model_path", "trade_start",
     ]
     variables = [
-        "p_up", "target_volume", "model_trained", "entry_price",
+        "p_up", "target_pct", "model_trained", "entry_price",
         "peak_price", "trough_price", "stop_price",
     ]
 
@@ -172,17 +184,65 @@ class AIStrategy(CtaTemplate):
         self.peak_price = 0.0
         self.trough_price = 0.0
         self.stop_price = 0.0
+        self.equity0 = 0.0
+        self.realized_pnl = 0.0
+        self.avg_cost = 0.0
+        self.target_pct = 0.0
 
-    def get_target_volume(self, price: float) -> int:
-        try:
-            capital = float(self.cta_engine.capital)
-            size = float(self.cta_engine.size)
-        except AttributeError:
-            return max(int(self.fixed_size), 1)
-        if capital <= 0 or price <= 0 or size <= 0:
-            return max(int(self.fixed_size), 1)
-        vol = int(capital * self.target_percent / (price * size))
-        return max(vol, 1)
+    def get_target_pct(self, p_up: float) -> float:
+        """凯利仓位比例：f = p - (1-p) = 2p - 1；kelly_scale 缩放，max_position 封顶。
+
+        allow_short=False 时下限封 0（p<=0.5 即空仓）；allow_short=True 才允许负仓位(做空)。
+        """
+        kelly = (p_up - (1.0 - p_up)) * self.kelly_scale
+        if not self.allow_short:
+            kelly = max(0.0, kelly)
+        return max(-self.max_position, min(self.max_position, kelly))
+
+    def current_equity(self, price: float) -> float:
+        """估算当前权益 = 初始资金 + 已实现盈亏 + 浮动盈亏（用于按百分比换算手数）。"""
+        eq = self.equity0 + self.realized_pnl
+        size = float(self.cta_engine.size)
+        if self.pos > 0 and self.avg_cost > 0:
+            eq += self.pos * size * (price - self.avg_cost)
+        elif self.pos < 0 and self.avg_cost != 0:
+            eq += abs(self.pos) * size * (self.avg_cost - price)
+        return eq
+
+    def get_target_lots(self, p_up: float, price: float) -> int:
+        """把目标仓位比例换算成目标手数（带符号：正=多，负=空）。"""
+        size = float(self.cta_engine.size)
+        if size <= 0 or price <= 0:
+            return 0
+        eq = self.current_equity(price)
+        if eq <= 0:
+            return 0
+        target_value = self.get_target_pct(p_up) * eq
+        lots = int(target_value / (price * size))
+        return lots
+
+    def _rebalance_to(self, target_lots: int, price: float) -> None:
+        """把当前持仓调整到目标手数（带符号），自动处理平多/平空/反手。"""
+        delta = target_lots - self.pos
+        if delta == 0:
+            return
+        if delta > 0:
+            if self.pos < 0:
+                self.buy(price, abs(self.pos))      # 先平空
+                remaining = delta - abs(self.pos)
+                if remaining > 0:
+                    self.buy(price, remaining)      # 再开多
+            else:
+                self.buy(price, delta)              # 加多/开多
+        else:
+            neg = -delta
+            if self.pos > 0:
+                self.sell(price, min(neg, self.pos))  # 先平多
+                remaining = neg - self.pos
+                if remaining > 0:
+                    self.sell(price, remaining)     # 再开空
+            else:
+                self.sell(price, neg)               # 加空/开空
 
     def on_init(self):
         self.write_log("AI 策略初始化")
@@ -196,6 +256,11 @@ class AIStrategy(CtaTemplate):
             except ValueError:
                 self.trade_start_dt = None
                 self.write_log(f"trade_start 格式错误，忽略: {self.trade_start}")
+        # 记录初始权益（按百分比换算手数的基准）
+        try:
+            self.equity0 = float(self.cta_engine.capital)
+        except AttributeError:
+            self.equity0 = 1_000_000.0
         # 固定模型模式：在回测开始前一次性加载冻结模型，运行期不再重训
         if self.fixed_model:
             self._load_model()
@@ -303,7 +368,6 @@ class AIStrategy(CtaTemplate):
             return
         proba = self.model.predict_proba(feat.reshape(1, -1))[0]
         self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
-        signal_up = self.p_up >= self.threshold
 
         # 样本外测试起点之前：仅预热，不参与交易（杜绝用测试期数据做决策/训练）
         if self.trade_start_dt is not None:
@@ -311,43 +375,63 @@ class AIStrategy(CtaTemplate):
             if bd < self.trade_start_dt:
                 return
 
-        vol = self.get_target_volume(bar.close_price)
-        if signal_up:
-            if self.pos < 0:
-                self.buy(bar.close_price, abs(self.pos) + vol)  # 平空 + 开多
-                self._enter_long(bar.close_price)
-            elif self.pos == 0:
-                self.buy(bar.close_price, vol)                  # 开多
-                self._enter_long(bar.close_price)
-            # self.pos > 0：已持有多头，不重复下单
-        else:
-            if self.pos > 0:
-                self.sell(bar.close_price, abs(self.pos))       # 平多
-                self._reset_position_state()
-            elif self.pos == 0 and self.allow_short:
-                self.sell(bar.close_price, vol)                 # 开空
-                self._enter_short(bar.close_price)
-            # self.pos < 0：已持有空头，不重复下单
+        # 凯利百分比仓位：target% = kelly_scale*(p_up-(1-p_up)) = kelly_scale*(2p-1)
+        # 每日把持仓调整到目标手数（带符号），自动上调/下调/平仓/反手。
+        self.target_pct = self.get_target_pct(self.p_up)
+        target_lots = self.get_target_lots(self.p_up, bar.close_price)
+        self._rebalance_to(target_lots, bar.close_price)
 
     def on_order(self, order: OrderData):
         pass
 
     def on_trade(self, trade: TradeData):
+        """成交后更新加权成本价、已实现盈亏与止损锚点（引擎在调用前已更新 self.pos）。"""
+        size = float(self.cta_engine.size)
+        px = float(trade.price)
+        vol = float(trade.volume)
+        # 还原成交前仓位，便于更新成本/盈亏
+        prev_pos = self.pos - vol if trade.direction == Direction.LONG else self.pos + vol
+        if trade.direction == Direction.LONG:
+            if prev_pos <= 0:
+                if prev_pos < 0:                        # 平空
+                    closed = min(vol, -prev_pos)
+                    self.realized_pnl += (self.avg_cost - px) * closed * size
+                if self.pos > 0:
+                    self.avg_cost = px                  # 新开多（含先平空再开多）
+                # self.pos == 0：恰好平空，avg_cost 已为 0
+            else:                                       # 加多：加权平均成本
+                self.avg_cost = (self.avg_cost * prev_pos + px * vol) / self.pos
+            # 部分平多（prev_pos>0 且 self.pos>0）时 avg_cost 保持不变
+        else:  # SHORT
+            if prev_pos >= 0:
+                if prev_pos > 0:                        # 平多
+                    closed = min(vol, prev_pos)
+                    self.realized_pnl += (px - self.avg_cost) * closed * size
+                if self.pos < 0:
+                    self.avg_cost = px                  # 新开空（含先平多再开空）
+                # self.pos == 0：恰好平多，avg_cost 已为 0
+            else:                                       # 加空：加权平均成本
+                self.avg_cost = (self.avg_cost * prev_pos - px * vol) / self.pos
+            # 部分平空（prev_pos<0 且 self.pos<0）时 avg_cost 保持不变
+
+        # 更新止损锚点
+        if self.pos > 0:
+            self.entry_price = self.avg_cost
+            if prev_pos == 0:                           # 新开多
+                self.peak_price = self.avg_cost
+                self.trough_price = self.avg_cost
+                self.stop_price = self.avg_cost * (1.0 - self.stop_loss_pct)
+        elif self.pos < 0:
+            self.entry_price = self.avg_cost
+            if prev_pos == 0:                           # 新开空
+                self.trough_price = self.avg_cost
+                self.peak_price = self.avg_cost
+                self.stop_price = self.avg_cost * (1.0 + self.stop_loss_pct)
+        else:
+            self._reset_position_state()
         self.put_event()
 
     # ---------- 持仓/止损状态管理 ----------
-    def _enter_long(self, price: float):
-        self.entry_price = price
-        self.peak_price = price
-        self.trough_price = price
-        self.stop_price = price * (1.0 - self.stop_loss_pct)
-
-    def _enter_short(self, price: float):
-        self.entry_price = price
-        self.trough_price = price
-        self.peak_price = price
-        self.stop_price = price * (1.0 + self.stop_loss_pct)
-
     def _reset_position_state(self):
         self.entry_price = 0.0
         self.peak_price = 0.0

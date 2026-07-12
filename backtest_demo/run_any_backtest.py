@@ -155,7 +155,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
         {
             "lookback": 60, "horizon": 5, "min_train": 250,
             "retrain_interval": 20, "threshold": 0.5,
-            "allow_short": False, "target_percent": 1.0,
+            "allow_short": False, "kelly_scale": 1.0, "max_position": 1.0,
             "stop_loss_pct": 0.05, "trailing_pct": 0.05,
             "fixed_model": True, "model_path": model_path,
             "trade_start": test_start or "",
@@ -203,16 +203,18 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
                        line=dict(color="#1f77b4", width=1.5), opacity=0.85), row=1, col=1,
         )
         if "end_pos" in df.columns:
-            pos_state = (df["end_pos"] > 0).astype(int) * 100
+            size = 1.0  # 指数回测 size=1；仓位占比 = 手数*收盘价 / 权益
+            exposure = df["end_pos"] * df["close_price"] * size / df["balance"] * 100.0
+            exposure = exposure.clip(lower=0)
             fig.add_trace(
-                go.Scatter(x=x_dates, y=pos_state, name="持仓(%)",
+                go.Scatter(x=x_dates, y=exposure, name="仓位(%)",
                            line=dict(color="#2ca02c", width=1.2), fill="tozeroy"),
                 row=2, col=1,
             )
         fig.update_yaxes(title_text="净值(归一化=100)", row=1, col=1)
         fig.update_xaxes(type="date", tickformat="%Y-%m-%d", row=1, col=1)
         fig.update_xaxes(type="date", tickformat="%Y-%m-%d", row=2, col=1)
-        fig.update_yaxes(title_text="持仓(%)", row=2, col=1)
+        fig.update_yaxes(title_text="仓位(%)", row=2, col=1)
 
         last_date = x_dates[-1].strftime("%Y-%m-%d")
         fig.add_annotation(xref="x domain", yref="y domain", x=1, y=0,
@@ -240,10 +242,20 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
         for dt, r in lw.iterrows():
             dstr = pd.to_datetime(dt).strftime("%Y-%m-%d")
             pos = int(r.get("end_pos", 0))
-            plabel = "多头" if pos > 0 else ("空头" if pos < 0 else "空仓")
+            balance = float(r["balance"])
+            close = float(r["close_price"])
+            size = 1.0  # 指数回测 size=1
+            pct = (pos * close * size / balance * 100.0) if balance else 0.0
+            pct = max(pct, 0.0)
+            if pos > 0:
+                plabel = "多头"
+            elif pos < 0:
+                plabel = "空头"
+            else:
+                plabel = "空仓"
             rows_html.append(
                 f"<tr><td>{dstr}</td><td>{plabel}</td>"
-                f"<td>{abs(pos)}</td><td>¥{float(r['balance']):,.2f}</td></tr>"
+                f"<td>{pct:.1f}%</td><td>¥{balance:,.2f}</td></tr>"
             )
         table_html = (
             "<div style='margin:10px 0 18px 0;font-family:sans-serif;'>"
@@ -251,7 +263,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
             "<table border='1' cellpadding='6' cellspacing='0' "
             "style='border-collapse:collapse;font-size:13px;'>"
             "<thead><tr style='background:#f2f2f2;'>"
-            "<th>日期</th><th>持仓</th><th>仓位(手)</th><th>总资产</th>"
+            "<th>日期</th><th>持仓</th><th>仓位(%)</th><th>总资产</th>"
             "</tr></thead><tbody>" + "".join(rows_html) + "</tbody></table></div>"
         )
         with open(html_path, "r", encoding="utf-8") as _f:
