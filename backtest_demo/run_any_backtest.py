@@ -180,8 +180,20 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
         from plotly.subplots import make_subplots
 
         x_dates = pd.to_datetime(df.index)
-        base_balance = df["balance"].iloc[0]
-        base_index = df["close_price"].iloc[0]
+        # 归一化基准：指定样本外测试起点时，资金与指数都在该日归一到 100；
+        # 不指定时沿用全区间首根。预热期资金恒定=1.0，故测试起点基准即初始资金。
+        if test_start_dt is not None:
+            _mask = x_dates >= test_start_dt
+            if _mask.any():
+                _i0 = int(np.argmax(_mask))
+                base_balance = float(df["balance"].iloc[_i0])
+                base_index = float(df["close_price"].iloc[_i0])
+            else:
+                base_balance = float(df["balance"].iloc[0])
+                base_index = float(df["close_price"].iloc[0])
+        else:
+            base_balance = float(df["balance"].iloc[0])
+            base_index = float(df["close_price"].iloc[0])
         capital_idx = df["balance"] / base_balance * 100.0
         index_idx = df["close_price"] / base_index * 100.0
 
@@ -190,7 +202,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
             row_heights=[0.7, 0.3], vertical_spacing=0.08,
             specs=[[{}], [{}]],
             subplot_titles=(
-                f"{name}（固定模型，{'样本外测试 ' + test_start + ' 起，' if test_start else ''}归一化=100）",
+                f"{name}（固定模型，{'样本外 ' + test_start + ' 起以测试起点归一化=100' if test_start else '归一化=100'}）",
                 "",
             ),
         )
