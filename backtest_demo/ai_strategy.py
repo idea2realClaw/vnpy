@@ -135,11 +135,14 @@ class AIStrategy(CtaTemplate):
     fixed_size = 1
     stop_loss_pct = 0.05   # 初始止损线：开仓后允许的最大浮亏（多头 below entry*(1-sl)，空头 above entry*(1+sl)）
     trailing_pct = 0.05    # 追踪止损幅度：盈利后止损价随高点(低点)上(下)移锁利润；设 0 退化为固定止损
+    fixed_model = True     # True=加载冻结模型，不再重训（固定参数、跨标的推理）
+    model_path = "rf_model.joblib"  # 固定模型文件（相对 ai_strategy.py 所在目录，或绝对路径）
 
     # 变量
     p_up = 0.0
     target_volume = 0
     model_trained = 0
+    n_features_ = 0        # 冻结模型期望的特征维数
     entry_price = 0.0      # 当前持仓开仓参考价
     peak_price = 0.0       # 持仓期间跟踪的高点（多头用）
     trough_price = 0.0     # 持仓期间跟踪的低点（空头用）
@@ -148,7 +151,7 @@ class AIStrategy(CtaTemplate):
     parameters = [
         "lookback", "horizon", "min_train", "retrain_interval",
         "threshold", "allow_short", "target_percent", "fixed_size",
-        "stop_loss_pct", "trailing_pct",
+        "stop_loss_pct", "trailing_pct", "fixed_model", "model_path",
     ]
     variables = [
         "p_up", "target_volume", "model_trained", "entry_price",
@@ -160,6 +163,7 @@ class AIStrategy(CtaTemplate):
         self.prices = []
         self.model = None
         self.bars_since_train = 0
+        self.n_features_ = 0
         self.am = ArrayManager()
         self.entry_price = 0.0
         self.peak_price = 0.0
@@ -179,6 +183,30 @@ class AIStrategy(CtaTemplate):
 
     def on_init(self):
         self.write_log("AI 策略初始化")
+        # 固定模型模式：在回测开始前一次性加载冻结模型，运行期不再重训
+        if self.fixed_model:
+            self._load_model()
+
+    def _load_model(self):
+        """从 model_path 加载冻结的随机森林模型（joblib）。"""
+        import joblib
+        import os
+
+        path = self.model_path
+        if not os.path.isabs(path):
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"固定模型文件不存在: {path}\n请先运行 train_model.py 生成 rf_model.joblib"
+            )
+        blob = joblib.load(path)
+        self.model = blob["model"]
+        self.n_features_ = int(blob.get("n_features", 0))
+        self.model_trained = 1
+        self.write_log(
+            f"已加载固定模型: {os.path.basename(path)} "
+            f"(n_features={self.n_features_}, 训练源={blob.get('source')})"
+        )
 
     def on_start(self):
         mode = "多空双向" if self.allow_short else "多头-only"
@@ -232,24 +260,34 @@ class AIStrategy(CtaTemplate):
                 self._reset_position_state()
                 return
 
-        # 滚动重训（walk-forward）
-        self.bars_since_train += 1
-        need_retrain = (self.model is None) or (self.bars_since_train >= self.retrain_interval)
-        if need_retrain and RandomForestClassifier is not None:
-            X, y = make_dataset(prices, self.lookback, self.horizon)
-            if len(X) >= 30:
-                self.model = RandomForestClassifier(
-                    n_estimators=50, max_depth=5, random_state=42, n_jobs=-1
-                )
-                self.model.fit(X, y)
-                self.bars_since_train = 0
-                self.model_trained = 1
-                self.write_log(f"模型重训完成，样本数={len(X)}")
+        # 滚动重训（walk-forward）——仅在非固定模型模式下执行
+        if not self.fixed_model:
+            self.bars_since_train += 1
+            need_retrain = (self.model is None) or (self.bars_since_train >= self.retrain_interval)
+            if need_retrain and RandomForestClassifier is not None:
+                X, y = make_dataset(prices, self.lookback, self.horizon)
+                if len(X) >= 30:
+                    self.model = RandomForestClassifier(
+                        n_estimators=50, max_depth=5, random_state=42, n_jobs=-1
+                    )
+                    self.model.fit(X, y)
+                    self.bars_since_train = 0
+                    self.model_trained = 1
+                    self.write_log(f"模型重训完成，样本数={len(X)}")
+        else:
+            # 固定模型：运行期不重训，仅记录已用训练轮数（无害）
+            self.bars_since_train += 1
 
         if self.model is None:
             return
 
         feat = feature_at(prices, n - 1)
+        # 固定模型模式下校验特征维数一致，避免训练/推理错位
+        if self.n_features_ and len(feat) != self.n_features_:
+            self.write_log(
+                f"特征维数不匹配: 推理 {len(feat)} != 模型 {self.n_features_}，跳过本根"
+            )
+            return
         proba = self.model.predict_proba(feat.reshape(1, -1))[0]
         self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
         signal_up = self.p_up >= self.threshold
