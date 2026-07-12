@@ -1,26 +1,27 @@
-"""对沪深300指数运行 CTA 双均线回测，并把指数走势叠加到资金曲线上。
+"""对恒生指数(HSI)运行 CTA 双均线回测，并把指数走势叠加到资金曲线上。
 
 用法（在仓库根目录执行）：
     /tmp/btvenv/bin/python backtest_demo/run_backtest.py
-前置：需先用 fetch_csi300.py 把真实指数日线写入数据库。
+前置：需先用 fetch_hsi.py 把真实 HSI 日线写入数据库。
 依赖：vnpy_ctastrategy（含 BacktestingEngine）/ vnpy_sqlite
-    （已装在 /tmp/btvenv；数据需先由 fetch_csi300.py 写入数据库）
+    （已装在 /tmp/btvenv；数据需先由 fetch_hsi.py 写入数据库）
 """
 from datetime import datetime
 
+import pandas as pd
 from vnpy.trader.constant import Exchange, Interval
 from vnpy_ctastrategy.backtesting import BacktestingEngine
 
 from double_ma_strategy import DoubleMaStrategy
 
-VT_SYMBOL = "000300.SSE"          # 沪深300指数（挂牌上交所，代码 000300）
-SYMBOL = "000300"
-EXCHANGE = Exchange.SSE
+VT_SYMBOL = "HSI.SEHK"            # 恒生指数（挂牌港交所，代码 HSI）
+SYMBOL = "HSI"
+EXCHANGE = Exchange.SEHK
 INTERVAL = Interval.DAILY
 # 注意：vnpy 数据库按上海时区以 naive 存储，因此 start/end 用 naive 日期，
 # 结束日略放大以确保尾部 K 线被纳入。
 START = datetime(2022, 1, 1)
-END = datetime(2024, 1, 10)
+END = datetime.now()                       # 结束日取今天，回测延伸到最新交易日
 
 
 def main() -> None:
@@ -38,11 +39,11 @@ def main() -> None:
         capital=1_000_000,  # 初始资金
     )
 
-    # fixed_size 放大到约 285，使 1 手持仓名义约 ≈ 满仓（≈100万/3500点），
-    # 这样资金曲线能真实反映“择时策略 vs 买入持有指数”的差异。
+    # target_percent=1.0：做多时投入 100% 资金（满仓），策略内部按
+    # capital/(close*size) 动态计算手数（HSI 约 20000 点 → ≈50 手满仓），空仓时 0%。
     engine.add_strategy(
         DoubleMaStrategy,
-        {"fast_window": 10, "slow_window": 20, "fixed_size": 285},
+        {"fast_window": 10, "slow_window": 20, "target_percent": 1.0},
     )
 
     engine.load_data()
@@ -62,47 +63,73 @@ def main() -> None:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
 
+            # 确保 x 轴为真正的日期类型（vnpy daily_df 的索引是 date 对象，
+            # 统一转成 pandas Timestamp，避免 plotly 当成 category 而显示不出日期）
+            x_dates = pd.to_datetime(df.index)
+
+            # 归一化：资金曲线与指数走势都除以各自起点、×100，
+            # 起点统一为 100，共用一个纵坐标，涨跌幅在图上等比例可直接对比。
+            base_balance = df["balance"].iloc[0]
+            base_index = df["close_price"].iloc[0]
+            capital_idx = df["balance"] / base_balance * 100.0      # 策略净值指数
+            index_idx = df["close_price"] / base_index * 100.0      # 指数净值指数
+
             fig = make_subplots(
                 rows=2, cols=1, shared_xaxes=True,
                 row_heights=[0.7, 0.3],
                 vertical_spacing=0.08,
-                specs=[[{"secondary_y": True}], [{}]],
-                subplot_titles=("资金曲线 & 沪深300指数走势", "持仓"),
+                specs=[[{}], [{}]],
+                subplot_titles=("资金曲线 & 恒生指数走势（归一化=100）", "持仓"),
             )
-            # 资金曲线（左轴）
+            # 策略净值指数（归一化，单一纵坐标）
             fig.add_trace(
                 go.Scatter(
-                    x=df.index, y=df["balance"],
-                    name="策略资金曲线",
+                    x=x_dates, y=capital_idx,
+                    name="策略资金净值",
                     line=dict(color="#ffc107", width=2),
                 ),
-                row=1, col=1, secondary_y=False,
+                row=1, col=1,
             )
-            # 沪深300指数收盘（右轴，作为参考/基准叠加）
+            # 沪深300指数净值（归一化，同一纵坐标，与资金曲线涨跌幅可比）
             fig.add_trace(
                 go.Scatter(
-                    x=df.index, y=df["close_price"],
-                    name="沪深300指数(收)",
+                    x=x_dates, y=index_idx,
+                    name="恒生指数净值",
                     line=dict(color="#1f77b4", width=1.5),
                     opacity=0.85,
                 ),
-                row=1, col=1, secondary_y=True,
+                row=1, col=1,
             )
-            # 持仓（底部子图）
+            # 持仓（底部子图）：以“持仓状态 %”展示，0% 空仓 / 100% 满仓多头，
+            # 二值切换，直观呈现 0%<->100%（实际资金占比会随行情在 ~100% 附近小幅浮动）。
             if "end_pos" in df.columns:
+                pos_state = (df["end_pos"] > 0).astype(int) * 100
                 fig.add_trace(
                     go.Scatter(
-                        x=df.index, y=df["end_pos"],
-                        name="持仓",
+                        x=x_dates, y=pos_state,
+                        name="持仓(%)",
                         line=dict(color="#2ca02c", width=1.2),
                         fill="tozeroy",
                     ),
                     row=2, col=1,
                 )
-            fig.update_yaxes(title_text="资金(元)", row=1, col=1, secondary_y=False)
-            fig.update_yaxes(title_text="指数点位", row=1, col=1, secondary_y=True)
+            fig.update_yaxes(title_text="净值(归一化=100)", row=1, col=1)
+            # 显式声明 x 轴为日期类型，并格式化刻度显示
+            fig.update_xaxes(
+                type="date",
+                tickformat="%Y-%m-%d",
+                title_text="日期",
+                row=1, col=1,
+            )
+            fig.update_xaxes(
+                type="date",
+                tickformat="%Y-%m-%d",
+                title_text="日期",
+                row=2, col=1,
+            )
+            fig.update_yaxes(title_text="持仓(%)", row=2, col=1)
             fig.update_layout(
-                title=f"沪深300指数 双均线回测 {VT_SYMBOL}", height=650
+                title=f"恒生指数 双均线回测 {VT_SYMBOL}", height=650
             )
             html_path = "backtest_demo/backtest_chart.html"
             fig.write_html(html_path)

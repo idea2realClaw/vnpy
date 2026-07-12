@@ -41,3 +41,6 @@ _templates
 # Alpha
 lab/
 /.mypy_cache
+
+# WorkBuddy project memory (local only, never commit)
+.workbuddy/

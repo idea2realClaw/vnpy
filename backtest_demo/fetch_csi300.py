@@ -22,7 +22,8 @@ SYMBOL = "000300"
 EXCHANGE = Exchange.SSE
 INTERVAL = Interval.DAILY
 START_DATE = "20220101"
-END_DATE = "20240101"
+# 结束日期动态取今天，重跑即自动延伸到最新交易日
+END_DATE = datetime.now().strftime("%Y%m%d")
 
 
 def fetch_bars() -> list[BarData]:
