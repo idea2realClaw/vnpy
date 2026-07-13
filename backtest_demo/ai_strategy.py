@@ -1,4 +1,6 @@
-"""AI 机器学习 CTA 策略（演示用）。
+"""凯利森林算法 (Kelly Forest) —— AI 机器学习 CTA 策略（演示用）。
+
+算法组成：冻结的随机森林（固定权重，运行期不重训）+ 凯利百分比仓位 + 追踪止损。
 
 思路：用历史行情构造技术指标特征，训练一个随机森林分类器，
 预测未来 N 日（horizon）指数是涨是跌；涨则做多、跌则空仓。
@@ -130,7 +132,11 @@ def make_dataset(prices: np.ndarray, lookback: int, horizon: int):
 
 
 class AIStrategy(CtaTemplate):
-    """随机森林 AI 择时策略（凯利百分比仓位：target% = kelly_scale*(p_up-(1-p_up))，带追踪止损）"""
+    """凯利森林算法 (Kelly Forest)：冻结随机森林(固定权重) + 凯利百分比仓位
+
+    target% = kelly_scale * (p_up - (1 - p_up)) = kelly_scale * (2p_up - 1)，带追踪止损。
+    模型冻结（fixed_model=True）时运行期不再重训，故一个在 HSI 上训好的模型可跨标的样本外推理。
+    """
 
     author = "demo-ai"
 
@@ -272,7 +278,11 @@ class AIStrategy(CtaTemplate):
 
         path = self.model_path
         if not os.path.isabs(path):
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+            # 优先按“策略文件所在目录”解析（如 rf_model.joblib），
+            # 否则回退为“当前工作目录相对路径”（如 backtest_demo/xxx.joblib），
+            # 避免相对路径被重复拼接成 backtest_demo/backtest_demo/... 导致找不到文件。
+            cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+            path = cand if os.path.exists(cand) else path
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"固定模型文件不存在: {path}\n请先运行 train_model.py 生成 rf_model.joblib"
