@@ -1,0 +1,9 @@
+﻿rank,strategy,total_return_%,annual_%,sharpe,max_dd_%,entries,excess_%
+1,DualThrustStrategy,8.36,1.79,0.369,-19.85,1,4.49
+2,DoubleMaStrategy,2.58,0.57,0.132,-13.65,1,-1.29
+3,MultiSignalStrategy,0.03,0.01,0.035,-10.87,33,-3.84
+4,BollChannelStrategy,0.0,0.0,0.0,0.0,0,-3.87
+5,KingKeltnerStrategy,0.0,0.0,0.0,0.0,0,-3.87
+6,MultiTimeframeStrategy,0.0,0.0,0.0,0.0,0,-3.87
+7,AtrRsiStrategy,-0.69,-0.15,-0.064,-3.52,123,-4.56
+8,TurtleSignalStrategy,-27.51,-6.87,-0.303,-43.52,57,-31.38
