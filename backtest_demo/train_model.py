@@ -1,24 +1,30 @@
-"""训练一次随机森林并冻结保存为固定模型（不再 walk-forward 重训）。
+"""训练并冻结保存为固定模型（不再 walk-forward 重训）。
 
 用法（在仓库根目录执行）：
-    # 全量训练（默认，向后兼容）
-    /tmp/btvenv/bin/python backtest_demo/train_model.py --source HSI
-    /tmp/btvenv/bin/python backtest_demo/train_model.py --source CSI300
+    # 随机森林（默认，13 维手工特征）
+    /Users/zhuxiaodong/.venvs/btvenv/bin/python backtest_demo/train_model.py --source HSI
 
-    # train/test 切分：只用 2022~2024 训练，2025 起做样本外测试
-    /tmp/btvenv/bin/python backtest_demo/train_model.py \
-        --source HSI --train-end 2024-12-31 \
-        --out backtest_demo/rf_model_HSI_2024.joblib
+    # 纯 AI 2D CNN（最近 lookback 根收盘价铺成 L×L 价格图，无手工特征）
+    /Users/zhuxiaodong/.venvs/btvenv/bin/python backtest_demo/train_model.py \
+        --source HSI --model-type cnn --train-end 2021-12-31
 
-输出：rf_model.joblib（或 --out 指定的路径）
-    存 {model, n_features, lookback, horizon, source, train_end, trained_at}
+    # train/test 切分：只用 2021 年底之前训练，2022 起做样本外测试
+    /Users/zhuxiaodong/.venvs/btvenv/bin/python backtest_demo/train_model.py \
+        --source HSI --model-type cnn --train-end 2021-12-31 \
+        --out backtest_demo/cnn_model_HSI_2021-12-31.joblib
+
+输出：<rf|cnn>_model.joblib（或 --out 指定的路径）
+    rf : 存 {model, n_features, lookback, horizon, source, train_end, trained_at}
+    cnn: 存 {model_type, model_config, model_weights, n_features, lookback,
+             horizon, source, train_end, trained_at}
+          （不存原始 keras 对象，加载时由 config+weights 重建）
 
 说明：
     之后任何标的都用这个“固定模型”做推理（run_any_backtest.py），
-    回测过程中不再重新训练。特征全为无量纲量（收益率 / 均线比值 /
-    RSI / 距高低），所以一个在 HSI 上训好的模型可以迁移到 CSI300
-    等其它标的——这正是“固定参数 + 任意标的推理”的核心前提。
-依赖：scikit-learn（已装在 /tmp/btvenv）
+    回测过程中不再重新训练。
+    - rf 特征为无量纲量（收益率 / 均线比值 / RSI / 距高低），可跨标的迁移；
+    - cnn 用“相对价”归一化的价格图（对绝对价格水平不变），同样可跨标的迁移。
+依赖：scikit-learn（rf）；tensorflow（cnn，需 pip install tensorflow-cpu）
 """
 import argparse
 import datetime
@@ -30,9 +36,48 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ai_strategy import make_dataset
+from ai_strategy import make_dataset, make_cnn_dataset
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def build_cnn_model(L: int):
+    """纯 AI 2D CNN：输入 L×L 价格图，输出未来 horizon 日涨跌的 2 类概率。
+
+    结构（比初版更深、更稳，仍不依赖任何手工技术指标，由 CNN 自己从价格图学形态）：
+      Conv2D(32,3)+BN → MaxPool → Conv2D(64,3)+BN → MaxPool
+      → Conv2D(64,3)+BN → GlobalAveragePool → Dense(64)+BN → Dropout(0.4) → Dense(2,softmax)
+    训练用 Adam(lr=1e-3) + ReduceLROnPlateau，早停在 val_accuracy 不提升时触发。
+    """
+    import tensorflow as tf
+    from tensorflow.keras import Sequential
+    from tensorflow.keras.layers import (
+        Input, Conv2D, MaxPool2D, GlobalAveragePooling2D, Flatten,
+        Dense, Dropout, BatchNormalization,
+    )
+
+    m = Sequential([
+        Input((L, L, 1)),
+        Conv2D(32, 3, padding="same", activation="relu"),
+        BatchNormalization(),
+        MaxPool2D(2),
+        Conv2D(64, 3, padding="same", activation="relu"),
+        BatchNormalization(),
+        MaxPool2D(2),
+        Conv2D(64, 3, padding="same", activation="relu"),
+        BatchNormalization(),
+        GlobalAveragePooling2D(),
+        Dense(64, activation="relu"),
+        BatchNormalization(),
+        Dropout(0.4),
+        Dense(2, activation="softmax"),
+    ])
+    m.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return m
 
 
 def get_bars(source: str):
@@ -58,9 +103,18 @@ def main() -> None:
              "之后的数据留作样本外测试，杜绝未来函数泄漏。",
     )
     ap.add_argument(
+        "--model-type", default="rf", choices=["rf", "cnn"],
+        help="模型类型：rf=随机森林(13维手工特征, 默认); "
+             "cnn=纯AI 2D CNN(最近 lookback 根收盘价铺成价格图, 无手工特征)。",
+    )
+    ap.add_argument(
+        "--epochs", type=int, default=20,
+        help="仅 CNN 训练用：训练轮数（默认 20）。",
+    )
+    ap.add_argument(
         "--out", default=None,
-        help="模型输出路径。默认 rf_model.joblib；指定 --train-end 且未给 --out 时"
-             "自动命名为 rf_model_<source>_<train-end>.joblib。",
+        help="模型输出路径。默认 rf_model.joblib(或 cnn_model.joblib)；"
+             "指定 --train-end 且未给 --out 时自动命名为 <类型>_model_<source>_<train-end>.joblib。",
     )
     args = ap.parse_args()
 
@@ -76,44 +130,83 @@ def main() -> None:
         f"区间 {bars[0].datetime.date()} ~ {bars[-1].datetime.date()}"
     )
 
-    X, y = make_dataset(prices, args.lookback, args.horizon)
+    if args.model_type == "cnn":
+        X, y = make_cnn_dataset(prices, args.lookback, args.horizon)
+    else:
+        X, y = make_dataset(prices, args.lookback, args.horizon)
     if len(X) < 30:
         raise RuntimeError("样本不足，无法训练（至少需要 30 条）")
     print(f"训练样本 X={X.shape}, 正类(涨)占比={y.mean():.2%}")
 
-    model = RandomForestClassifier(
-        n_estimators=50, max_depth=5, random_state=42, n_jobs=-1
-    )
-    model.fit(X, y)
-    print("随机森林训练完成（固定参数，不再重训）")
-
-    # 决定输出路径
-    if args.out:
-        out = args.out
-    elif args.train_end:
-        out = os.path.join(HERE, f"rf_model_{args.source}_{args.train_end}.joblib")
+    trained_at = datetime.datetime.now().isoformat(timespec="seconds")
+    if args.model_type == "cnn":
+        from tensorflow.keras.callbacks import (
+            EarlyStopping, ReduceLROnPlateau, TerminateOnNaN,
+        )
+        model = build_cnn_model(args.lookback)
+        print(f"CNN 训练开始（epochs={args.epochs}, 输入 {args.lookback}x{args.lookback} 价格图）...")
+        model.fit(
+            X, y,
+            epochs=args.epochs,
+            batch_size=32,
+            validation_split=0.15,
+            verbose=2,
+            callbacks=[
+                EarlyStopping(monitor="val_accuracy", mode="max",
+                              patience=10, restore_best_weights=True,
+                              min_delta=0.005),
+                ReduceLROnPlateau(monitor="val_loss", factor=0.5,
+                                  patience=5, min_lr=1e-5, verbose=1),
+                TerminateOnNaN(),
+            ],
+        )
+        print("CNN 训练完成（固定参数，不再重训）")
+        meta = {
+            "model_type": "cnn",
+            "model_config": model.to_json(),
+            "model_weights": model.get_weights(),
+            "n_features": int(args.lookback),
+            "lookback": args.lookback,
+            "horizon": args.horizon,
+            "source": args.source,
+            "train_end": args.train_end,
+            "trained_at": trained_at,
+        }
+        prefix = "cnn_model"
     else:
-        out = os.path.join(HERE, "rf_model.joblib")
-    if not os.path.isabs(out):
-        out = os.path.join(HERE, out)
-
-    joblib.dump(
-        {
+        model = RandomForestClassifier(
+            n_estimators=50, max_depth=5, random_state=42, n_jobs=-1
+        )
+        model.fit(X, y)
+        print("随机森林训练完成（固定参数，不再重训）")
+        meta = {
+            "model_type": "rf",
             "model": model,
             "n_features": int(X.shape[1]),
             "lookback": args.lookback,
             "horizon": args.horizon,
             "source": args.source,
             "train_end": args.train_end,
-            "trained_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        },
-        out,
-    )
+            "trained_at": trained_at,
+        }
+        prefix = "rf_model"
+
+    # 决定输出路径
+    if args.out:
+        out = args.out
+    elif args.train_end:
+        out = os.path.join(HERE, f"{prefix}_{args.source}_{args.train_end}.joblib")
+    else:
+        out = os.path.join(HERE, f"{prefix}.joblib")
+    if not os.path.isabs(out):
+        out = os.path.join(HERE, out)
+
+    joblib.dump(meta, out)
     print(f"固定模型已保存: {out}")
     if args.train_end:
         print(
             "样本外测试命令（例如）：\n"
-            f"  /tmp/btvenv/bin/python backtest_demo/run_any_backtest.py "
+            f"  /Users/zhuxiaodong/.venvs/btvenv/bin/python backtest_demo/run_any_backtest.py "
             f"--target {args.source} --model {os.path.basename(out)} "
             f"--test-start 2025-01-01"
         )

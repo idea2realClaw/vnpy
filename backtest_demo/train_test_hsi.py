@@ -2,20 +2,23 @@
 
 本脚本把“训练”和“回测”两个步骤明确拆开，并强制约束二者区间不重叠：
 
-    阶段一  TRAIN   只取 train_end（含）及之前的数据训练随机森林，冻结保存为固定模型。
+    阶段一  TRAIN   只取 train_end（含）及之前的数据训练模型（默认纯AI 2D CNN，
+                     可由 --model-type rf 切回随机森林），冻结保存为固定模型。
                      该模型在阶段二运行期间绝不再重训。
     阶段二  TEST    用冻结模型对 test_start（含）及之后的数据做样本外推理；
-                     test_start 之前的数据仅作预热（构造特征），不参与训练、也不交易。
+                     test_start 之前的数据仅作预热（构造特征/价格图），不参与训练、也不交易。
 
 核心不变量（任一违反即报错退出）：  train_end < test_start
     —— 保证训练期与测试期 100% 不重叠，彻底杜绝未来函数泄漏。
 
 说明：
-    - 训练与回测共用同一数据源（yfinance ^HSI，2016 起）与同一套无量纲特征
-      （见 ai_strategy.feature_at / make_dataset），故训练好的模型可直接迁移推理。
+    - 训练与回测共用同一数据源（yfinance ^HSI，2016 起）。
+    - CNN 模式（默认）：用最近 lookback 根收盘价铺成 L×L 价格图（相对价归一化），
+      纯 AI、无任何手工技术指标（见 ai_strategy.cnn_image / make_cnn_dataset）。
+    - RF 模式：用 13 维无量纲手工特征（见 ai_strategy.feature_at / make_dataset）。
     - run_any_backtest.py 的默认 MODEL_PATH 仍是 v0.0.5 时期的泄漏模型 rf_model.joblib
       （保留作历史存档，能跑出 +59.56%）。本脚本**显式指定**干净模型
-      rf_model_HSI_2016.joblib，因此默认给出的是诚实的样本外结果。
+      （默认 cnn_model_HSI_2021-12-31.joblib），因此默认给出的是诚实的样本外结果。
 
 用法（仓库根目录执行，需先装好 venv：/Users/zhuxiaodong/.venvs/btvenv）：
     /Users/zhuxiaodong/.venvs/btvenv/bin/python backtest_demo/train_test_hsi.py
@@ -52,13 +55,18 @@ def _run(cmd: list) -> None:
         raise SystemExit(f"子命令失败（exit={rc}）: {' '.join(cmd)}")
 
 
-def phase_train(source: str, train_end: str, model_out: str) -> dict:
-    _banner(f"阶段一  TRAIN  ▶ 只训练 {source} 在 {train_end}（含）之前的数据")
+def phase_train(source: str, train_end: str, model_out: str, model_type: str = "rf") -> dict:
+    _banner(f"阶段一  TRAIN  ▶ 只训练 {source} 在 {train_end}（含）之前的数据"
+            + ("（纯AI CNN）" if model_type == "cnn" else "（随机森林）"))
     out_path = model_out if os.path.isabs(model_out) else os.path.join(HERE, model_out)
-    _run([
+    cmd = [
         sys.executable, os.path.join(HERE, "train_model.py"),
         "--source", source, "--train-end", train_end, "--out", out_path,
-    ])
+        "--model-type", model_type,
+    ]
+    if model_type == "cnn":
+        cmd += ["--epochs", "60"]
+    _run(cmd)
     blob = joblib.load(out_path)
     meta = {k: v for k, v in blob.items() if k != "model"}
     print("\n[模型元数据]")
@@ -88,7 +96,9 @@ def main() -> None:
     ap.add_argument("--test-start", default="2022-01-01",
                     help="样本外测试起点(含)，YYYY-MM-DD。默认 2022-01-01")
     ap.add_argument("--model-out", default=None,
-                    help="干净模型输出路径；默认 rf_model_<source>_<train_end>.joblib")
+                    help="干净模型输出路径；默认 <rf|cnn>_model_<source>_<train_end>.joblib")
+    ap.add_argument("--model-type", default="cnn", choices=["rf", "cnn"],
+                    help="模型类型（默认 cnn=纯AI 2D CNN；rf=随机森林）。")
     ap.add_argument("--no-train", action="store_true",
                     help="跳过训练，直接复用已存在的干净模型做测试")
     ap.add_argument("--no-kelly", action="store_true",
@@ -106,7 +116,8 @@ def main() -> None:
             f"请增大间隔（如 train_end=2021-12-31, test-start=2022-01-01）。"
         )
 
-    model_out = args.model_out or f"rf_model_{args.source}_{args.train_end}.joblib"
+    prefix = "cnn_model" if args.model_type == "cnn" else "rf_model"
+    model_out = args.model_out or f"{prefix}_{args.source}_{args.train_end}.joblib"
     out_path = model_out if os.path.isabs(model_out) else os.path.join(HERE, model_out)
 
     _banner("HSI 训练 / 回测 严格分离")
@@ -123,7 +134,7 @@ def main() -> None:
         for k, v in meta.items():
             print(f"  {k}: {v}")
     else:
-        meta = phase_train(args.source, args.train_end, model_out)
+        meta = phase_train(args.source, args.train_end, model_out, model_type=args.model_type)
         # 二次校验：模型自身记录的 train_end 必须早于测试起点
         mte = meta.get("train_end")
         if mte:

@@ -129,6 +129,43 @@ def make_dataset(prices: np.ndarray, lookback: int, horizon: int):
     return np.array(X), np.array(y)
 
 
+def cnn_image(prices: np.ndarray, i: int, lookback: int) -> np.ndarray:
+    """把第 i 根 bar 之前(含)的 lookback 个收盘价，归一化后铺成 L×L 的二维“价格图”。
+
+    - 取窗口 window = prices[i-lookback+1 : i+1]，以窗口首根价为基准做相对价
+      （对绝对价格水平不变，便于跨标的迁移）。
+    - 用 Hankel(滑动)方式展开成 L×L 图像：img[a, b] = 归一化价[a+b]。
+      这是“纯 AI”做法——不依赖任何手工技术指标，由 CNN 自己学形态。
+    - 返回 shape (L, L, 1)，可直接喂给 2D CNN。
+    构建只用 i 及之前的信息，无未来函数。
+    """
+    window = np.asarray(prices[i - lookback + 1: i + 1], dtype=np.float32)
+    base = float(window[0]) if window[0] != 0 else 1.0
+    yv = window / base - 1.0
+    L = lookback
+    img = np.zeros((L, L), dtype=np.float32)
+    for a in range(L):
+        for b in range(L - a):
+            img[a, b] = yv[a + b]
+    return img.reshape(L, L, 1)
+
+
+def make_cnn_dataset(prices: np.ndarray, lookback: int, horizon: int):
+    """构造 CNN 训练集 (X, y)：每个样本是位置 i 的 L×L 价格图，标签为未来 horizon 日涨跌。"""
+    X, y = [], []
+    L = lookback
+    n = len(prices)
+    for i in range(L - 1, n - horizon):
+        lab = label_at(prices, i, horizon)
+        if lab < 0:
+            continue
+        X.append(cnn_image(prices, i, L))
+        y.append(lab)
+    if not X:
+        return np.empty((0, L, L, 1)), np.empty((0,))
+    return np.array(X), np.array(y)
+
+
 class AIStrategy(CtaTemplate):
     """随机森林 AI 择时策略（凯利百分比仓位：target% = kelly_scale*(p_up-(1-p_up))，带追踪止损）"""
 
@@ -149,6 +186,7 @@ class AIStrategy(CtaTemplate):
     fixed_model = True     # True=加载冻结模型，不再重训（固定参数、跨标的推理）
     model_path = "rf_model.joblib"  # 固定模型文件（相对 ai_strategy.py 所在目录，或绝对路径）
     trade_start = ""       # 样本外测试起点 (YYYY-MM-DD)；留空=不限制。该日之前只预热积累特征、不交易
+    model_type = "rf"      # 冻结模型类型：rf=随机森林(13维特征)；cnn=2D CNN(价格图)。加载模型时由 blob 覆盖
 
     # 变量
     p_up = 0.0
@@ -284,13 +322,26 @@ class AIStrategy(CtaTemplate):
                 f"固定模型文件不存在: {path}\n请先运行 train_model.py 生成 rf_model.joblib"
             )
         blob = joblib.load(path)
-        self.model = blob["model"]
+        self.model_type = blob.get("model_type", "rf")
         self.n_features_ = int(blob.get("n_features", 0))
+        if self.model_type == "cnn":
+            # CNN 模型：从 config+weights 重建 keras 模型（joblib 不存原始 model 对象）
+            import tensorflow as tf
+            mdl = tf.keras.models.model_from_json(blob["model_config"])
+            mdl.set_weights(blob["model_weights"])
+            self.model = mdl
+            self.lookback = int(blob.get("lookback", self.lookback))
+            self.write_log(
+                f"已加载 CNN 固定模型: {os.path.basename(path)} "
+                f"(输入 {self.lookback}x{self.lookback} 价格图, 训练源={blob.get('source')})"
+            )
+        else:
+            self.model = blob["model"]
+            self.write_log(
+                f"已加载固定模型: {os.path.basename(path)} "
+                f"(n_features={self.n_features_}, 训练源={blob.get('source')})"
+            )
         self.model_trained = 1
-        self.write_log(
-            f"已加载固定模型: {os.path.basename(path)} "
-            f"(n_features={self.n_features_}, 训练源={blob.get('source')})"
-        )
 
     def on_start(self):
         mode = "多空双向" if self.allow_short else "多头-only"
@@ -365,15 +416,24 @@ class AIStrategy(CtaTemplate):
         if self.model is None:
             return
 
-        feat = feature_at(prices, n - 1)
-        # 固定模型模式下校验特征维数一致，避免训练/推理错位
-        if self.n_features_ and len(feat) != self.n_features_:
-            self.write_log(
-                f"特征维数不匹配: 推理 {len(feat)} != 模型 {self.n_features_}，跳过本根"
-            )
-            return
-        proba = self.model.predict_proba(feat.reshape(1, -1))[0]
-        self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
+        if self.model_type == "cnn":
+            # 纯 AI CNN：把最近 lookback 根收盘价铺成 L×L 价格图，直接推理涨跌概率
+            if n < self.lookback:
+                return
+            X = cnn_image(prices, n - 1, self.lookback)        # (L, L, 1)
+            X = np.expand_dims(X, axis=0)                       # (1, L, L, 1) 加 batch 维
+            proba = self.model.predict(X, verbose=0)[0]
+            self.p_up = float(proba[1]) if len(proba) > 1 else 0.5
+        else:
+            feat = feature_at(prices, n - 1)
+            # 固定模型模式下校验特征维数一致，避免训练/推理错位
+            if self.n_features_ and len(feat) != self.n_features_:
+                self.write_log(
+                    f"特征维数不匹配: 推理 {len(feat)} != 模型 {self.n_features_}，跳过本根"
+                )
+                return
+            proba = self.model.predict_proba(feat.reshape(1, -1))[0]
+            self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
 
         # 样本外测试起点之前：仅预热，不参与交易（杜绝用测试期数据做决策/训练）
         if self.trade_start_dt is not None:
