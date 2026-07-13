@@ -143,6 +143,7 @@ class AIStrategy(CtaTemplate):
     allow_short = False    # 是否允许做空（默认 False）；False 时 p<=0.5 直接空仓
     kelly_scale = 1.0      # 凯利系数缩放：仓位 = kelly_scale*(p-(1-p))；1.0=满凯利，0.5=半凯利
     max_position = 1.0     # 单标的仓位上限（占总权益比例），1.0=不封顶
+    use_kelly = True       # True=凯利百分比仓位；False=二值仓位(满仓100%/空仓0%)
     stop_loss_pct = 0.05   # 初始止损线：开仓后允许的最大浮亏（多头 below entry*(1-sl)，空头 above entry*(1+sl)）
     trailing_pct = 0.05    # 追踪止损幅度：盈利后止损价随高点(低点)上(下)移锁利润；设 0 退化为固定止损
     fixed_model = True     # True=加载冻结模型，不再重训（固定参数、跨标的推理）
@@ -164,7 +165,7 @@ class AIStrategy(CtaTemplate):
 
     parameters = [
         "lookback", "horizon", "min_train", "retrain_interval",
-        "threshold", "allow_short", "kelly_scale", "max_position",
+        "threshold", "allow_short", "kelly_scale", "max_position", "use_kelly",
         "stop_loss_pct", "trailing_pct", "fixed_model", "model_path", "trade_start",
     ]
     variables = [
@@ -190,10 +191,15 @@ class AIStrategy(CtaTemplate):
         self.target_pct = 0.0
 
     def get_target_pct(self, p_up: float) -> float:
-        """凯利仓位比例：f = p - (1-p) = 2p - 1；kelly_scale 缩放，max_position 封顶。
+        """目标仓位比例（占总权益）。
 
-        allow_short=False 时下限封 0（p<=0.5 即空仓）；allow_short=True 才允许负仓位(做空)。
+        use_kelly=False  → 二值仓位：p_up>=threshold 满仓 100%(=max_position)，否则空仓 0%；
+                           即“满仓/空仓”两档，去掉凯利百分比缩放。
+        use_kelly=True   → 凯利百分比仓位：f = p-(1-p) = 2p-1；kelly_scale 缩放，max_position 封顶。
+        allow_short=False 时凯利仓位下限封 0（p<=0.5 即空仓）。
         """
+        if not self.use_kelly:
+            return self.max_position if p_up >= self.threshold else 0.0
         kelly = (p_up - (1.0 - p_up)) * self.kelly_scale
         if not self.allow_short:
             kelly = max(0.0, kelly)

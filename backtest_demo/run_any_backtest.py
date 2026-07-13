@@ -129,7 +129,8 @@ def compute_window_stats(df: pd.DataFrame, test_start_dt: datetime):
     }
 
 
-def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None) -> None:
+def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None,
+                 use_kelly: bool = True) -> None:
     vt_symbol = f"{cfg['symbol']}.{cfg['exchange'].value}"
     name = cfg["name"]
     test_start_dt = None
@@ -156,6 +157,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
             "lookback": 60, "horizon": 5, "min_train": 250,
             "retrain_interval": 20, "threshold": 0.5,
             "allow_short": False, "kelly_scale": 1.0, "max_position": 1.0,
+            "use_kelly": use_kelly,
             "stop_loss_pct": 0.05, "trailing_pct": 0.05,
             "fixed_model": True, "model_path": model_path,
             "trade_start": test_start or "",
@@ -321,6 +323,10 @@ def main() -> None:
         help="样本外测试起点 (YYYY-MM-DD)。指定后仅用该日及之后做推理/交易，"
              "之前的数据作预热（模型已冻结，绝不训练）。对应 train_model.py 的 --train-end。",
     )
+    ap.add_argument(
+        "--no-kelly", action="store_true",
+        help="去掉凯利百分比仓位，改用二值仓位：p>=threshold 满仓(100%)/否则空仓(0%)。",
+    )
     args = ap.parse_args()
 
     model_path = MODEL_PATH
@@ -331,7 +337,10 @@ def main() -> None:
 
     cfg = build_cfg(args)
     ensure_data(cfg)
-    run_backtest(cfg, model_path=model_path, test_start=args.test_start)
+    run_backtest(
+        cfg, model_path=model_path, test_start=args.test_start,
+        use_kelly=not args.no_kelly,
+    )
 
 
 if __name__ == "__main__":

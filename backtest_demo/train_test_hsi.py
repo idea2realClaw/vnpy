@@ -67,12 +67,16 @@ def phase_train(source: str, train_end: str, model_out: str) -> dict:
     return meta
 
 
-def phase_test(target: str, model_out: str, test_start: str) -> None:
-    _banner(f"阶段二  TEST   ▶ 用冻结模型对 {target} 自 {test_start} 起做样本外推理")
-    _run([
+def phase_test(target: str, model_out: str, test_start: str, no_kelly: bool = False) -> None:
+    _banner(f"阶段二  TEST   ▶ 用冻结模型对 {target} 自 {test_start} 起做样本外推理"
+            + ("（二值满仓/空仓，无凯利）" if no_kelly else "（凯利百分比仓位）"))
+    cmd = [
         sys.executable, os.path.join(HERE, "run_any_backtest.py"),
         "--target", target, "--model", model_out, "--test-start", test_start,
-    ])
+    ]
+    if no_kelly:
+        cmd.append("--no-kelly")
+    _run(cmd)
 
 
 def main() -> None:
@@ -87,6 +91,8 @@ def main() -> None:
                     help="干净模型输出路径；默认 rf_model_<source>_<train_end>.joblib")
     ap.add_argument("--no-train", action="store_true",
                     help="跳过训练，直接复用已存在的干净模型做测试")
+    ap.add_argument("--no-kelly", action="store_true",
+                    help="去掉凯利百分比仓位，改用二值仓位(满仓100%/空仓0%)")
     args = ap.parse_args()
 
     train_end_dt = datetime.datetime.strptime(args.train_end, "%Y-%m-%d").date()
@@ -129,7 +135,7 @@ def main() -> None:
                 )
             print(f"\n[校验] 模型 train_end={mte} < test_start={args.test_start} ✅")
 
-    phase_test(args.target, model_out, args.test_start)
+    phase_test(args.target, model_out, args.test_start, no_kelly=args.no_kelly)
 
     _banner("完成：训练与回测已分离，测试期为严格样本外（无未来函数）")
     print(f"  训练模型 : {model_out}  (train_end={meta.get('train_end')})")
