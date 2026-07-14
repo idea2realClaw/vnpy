@@ -131,7 +131,7 @@ def compute_window_stats(df: pd.DataFrame, test_start_dt: datetime):
 
 def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None,
                  use_kelly: bool = True, out_name: str = None,
-                 hold_period: int = 5) -> None:
+                 hold_period: int = 5, prior_adjust: bool = False) -> None:
     vt_symbol = f"{cfg['symbol']}.{cfg['exchange'].value}"
     name = cfg["name"]
     base = out_name or f"frozen_{cfg['symbol']}"
@@ -164,6 +164,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
             "fixed_model": True, "model_path": model_path,
             "trade_start": test_start or "",
             "hold_period": hold_period,
+            "prior_adjust": prior_adjust,
         },
     )
     engine.load_data()
@@ -338,6 +339,10 @@ def main() -> None:
         "--out-name", default=None,
         help="输出文件基名（不含后缀），如 rf_rank_kelly；默认 frozen_<symbol>。",
     )
+    ap.add_argument(
+        "--prior-adjust", action="store_true",
+        help="先验校正：把 RF 分类输出的涨概率去训练集先验偏置(P0)，并按 (1-P0) 二值化。仅影响 --no-kelly 分类路径。",
+    )
     args = ap.parse_args()
 
     model_path = MODEL_PATH
@@ -352,6 +357,7 @@ def main() -> None:
         cfg, model_path=model_path, test_start=args.test_start,
         use_kelly=not args.no_kelly,
         out_name=args.out_name, hold_period=args.hold_period,
+        prior_adjust=args.prior_adjust,
     )
 
 

@@ -238,6 +238,7 @@ def main() -> None:
                 "source": args.source,
                 "train_end": args.train_end,
                 "trained_at": trained_at,
+                "pos_rate": float(y.mean()),   # 训练集正类率(先验 P0)，供推理期先验校正使用
             }
             prefix = "rf_model"
 

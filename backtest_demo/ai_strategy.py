@@ -252,6 +252,8 @@ class AIStrategy(CtaTemplate):
     regression = False     # 回归模式：CNN 输出为归一化 5 日涨幅 P∈[0,1]（而非涨跌概率）。
                            # 回测时用凯利定律 f=2P-1 把 P 换算成仓位比例。加载模型时由 blob 覆盖
 
+    prior_adjust = False  # 先验校正：开启后把 RF 分类输出的涨概率去训练集先验偏置(P0)，并按 (1-P0) 二值化
+
     # 变量
     p_up = 0.0
     target_pct = 0.0       # 当前目标仓位比例（占总权益）
@@ -269,7 +271,7 @@ class AIStrategy(CtaTemplate):
         "lookback", "horizon", "min_train", "retrain_interval",
         "threshold", "allow_short", "kelly_scale", "max_position", "use_kelly",
         "stop_loss_pct", "trailing_pct", "fixed_model", "model_path", "trade_start",
-        "regression", "hold_period",
+        "regression", "hold_period", "prior_adjust",
     ]
     variables = [
         "p_up", "target_pct", "model_trained", "entry_price",
@@ -293,6 +295,20 @@ class AIStrategy(CtaTemplate):
         self.avg_cost = 0.0
         self.target_pct = 0.0
         self.bars_held = 0       # 当前持仓已持有的根数（配合 hold_period）
+        self.p0 = None            # 训练集涨概率先验(P0)，由模型 blob 的 pos_rate 注入；None=未知不校正
+
+    def _prior_correct(self, p) -> float:
+        """先验校正（去训练集先验偏置）：P = P1*(1-P0) / (P1*(1-P0) + (1-P1)*P0)。
+        仅当开启 prior_adjust 且已知训练集涨概率 p0 时生效；否则原样返回。
+        """
+        if not getattr(self, "prior_adjust", False) or not self.p0:
+            return float(p)
+        eps = 1e-9
+        p1 = min(max(float(p), eps), 1.0 - eps)
+        p0 = min(max(self.p0, eps), 1.0 - eps)
+        num = p1 * (1.0 - p0)
+        den = num + (1.0 - p1) * p0
+        return num / den
 
     def get_target_pct(self, p_up: float) -> float:
         """目标仓位比例（占总权益）。
@@ -303,7 +319,8 @@ class AIStrategy(CtaTemplate):
         allow_short=False 时凯利仓位下限封 0（p<=0.5 即空仓）。
         """
         if not self.use_kelly:
-            return self.max_position if p_up >= self.threshold else 0.0
+            thr = (1.0 - self.p0) if (getattr(self, "prior_adjust", False) and self.p0) else self.threshold
+            return self.max_position if p_up >= thr else 0.0
         kelly = (p_up - (1.0 - p_up)) * self.kelly_scale
         if not self.allow_short:
             kelly = max(0.0, kelly)
@@ -409,6 +426,7 @@ class AIStrategy(CtaTemplate):
                 f"已加载固定模型: {os.path.basename(path)} "
                 f"(n_features={self.n_features_}, 训练源={blob.get('source')})"
             )
+        self.p0 = blob.get("pos_rate", self.p0)   # 训练集正类率(先验 P0)，用于先验校正
         self.model_trained = 1
 
     def on_start(self):
@@ -518,6 +536,7 @@ class AIStrategy(CtaTemplate):
             else:
                 proba = np.squeeze(pred)
                 self.p_up = float(proba[1]) if len(proba) > 1 else 0.5
+                self.p_up = self._prior_correct(self.p_up)  # 分类概率路径先验校正
         else:
             feat = feature_at(prices, n - 1)
             # 固定模型模式下校验特征维数一致，避免训练/推理错位
@@ -534,6 +553,7 @@ class AIStrategy(CtaTemplate):
             else:
                 proba = self.model.predict_proba(feat.reshape(1, -1))[0]
                 self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
+                self.p_up = self._prior_correct(self.p_up)  # 分类概率路径先验校正
 
         # 样本外测试起点之前：仅预热，不参与交易（杜绝用测试期数据做决策/训练）
         if self.trade_start_dt is not None:

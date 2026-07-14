@@ -14,8 +14,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # 策略顺序（循环互链）。metrics = 顶部状态栏显示的概要。
 STRATEGY_NAV = [
-    ("RF 二值（h10·每天调仓）", "rf_binary_chart.html",
-     "样本外 +30.25% ｜ 超额 +26.21% ｜ Sharpe 0.466 ｜ 回撤 −21.83% ｜ 57 笔"),
+    ("RF 二值（h10·先验校正）", "rf_binary_prior_chart.html",
+     "样本外 +30.25%(与无校正等价) ｜ 超额 +26.21% ｜ Sharpe 0.466 ｜ 回撤 −21.83% ｜ 57 笔"),
     ("RF Rank 凯利版（h10·每天调仓）", "rf_rank_kelly_chart.html",
      "样本外 +8.58% ｜ 超额 +4.54% ｜ Sharpe 0.310 ｜ 回撤 −15.82% ｜ 73 笔"),
     ("RF Rank 二值版（h10·每天调仓）", "rf_rank_binary_chart.html",
