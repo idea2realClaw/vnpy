@@ -42,6 +42,30 @@ except ImportError:  # pragma: no cover
     RandomForestClassifier = None
 
 
+# ---------- 5 日涨幅归一化（统一函数，训练/推理共用） ----------
+# 把 horizon 日涨幅 r 用「训练集涨幅的 Rank 百分位」归一化到 0~100（即 0~1）：
+#   - 跌 (r < 0)              → 0
+#   - r >= 0                  → (训练集中 <= r 的样本数) / (训练集样本总数) * 100
+#                                也就是该涨幅在训练分布里所处的百分位百分比。
+# 训练时它作为“胜率 P”的标签；回测时 CNN 直接输出这个 P（0~100%），再用凯利定律算仓位。
+# 关键点：归一化的 Rank 来自「训练集」的涨幅分布，测试/推理时不接触测试数据，无未来函数。
+
+
+def NormalizeReturn(train_values, r: float) -> float:
+    """把单条 horizon 日涨幅 r 用训练集 train_values 的 Rank 百分位归一化到 0~100。
+
+    对训练集「全部」涨幅（含 <0 的亏损）一起升序 Rank 排序：
+      - 名次 = 训练集中 <= r 的样本数（含负值样本）
+      - 归一化值 = 名次 / 训练样本总数 * 100，即 r 在训练分布里的百分位百分比
+    负数涨幅不会归零，而是排在低百分位（如最差涨幅→≈0%，略亏→较小百分比）；
+    涨幅越大百分位越高（最大→100%）。训练与回测统一使用本函数：
+    训练时 train_values = 训练集全部 forward 涨幅；回测时模型直接输出该百分位 P。
+    """
+    arr = np.sort(np.asarray(train_values, dtype=float))
+    rank = float(np.searchsorted(arr, r, side="right"))  # 落在 r 及以下的样本数（含负值）
+    return (rank / len(arr)) * 100.0
+
+
 # ---------- 特征工程（纯 numpy，不依赖 TA-Lib，避免运行时缺库） ----------
 
 def _sma(arr: np.ndarray, n: int) -> float:
@@ -114,14 +138,30 @@ def label_at(prices: np.ndarray, i: int, horizon: int) -> int:
     return 1 if fut > 0 else 0
 
 
-def make_dataset(prices: np.ndarray, lookback: int, horizon: int):
-    """构造训练集 (X, y)。遍历历史点，特征在 i 及之前，标签在 i 之后。"""
+def make_dataset(prices: np.ndarray, lookback: int, horizon: int, regression: bool = False):
+    """构造训练集 (X, y)。遍历历史点，特征在 i 及之前，标签在 i 之后。
+
+    regression=False（默认，分类）：标签 = 未来 horizon 日涨跌 (1=涨 / 0=跌)。
+    regression=True （回归）：标签 = NormalizeReturn(训练集全部涨幅(含亏损), 未来 horizon 日涨幅) / 100，
+        即「该涨幅在训练集涨幅分布中的 Rank 百分位」缩到 [0,1]，作为胜率 P
+        （RF 回归器 / CNN 共用同一套标签口径，回测按凯利 f=2P-1 算仓位）。
+    """
     X, y = [], []
-    for i in range(lookback, len(prices) - horizon):
+    n = len(prices)
+    if regression:
+        idxs = list(range(lookback, n - horizon))
+        futures = np.array(
+            [prices[i + horizon] / prices[i] - 1.0 for i in idxs], dtype=float
+        )
+    for i in range(lookback, n - horizon):
         f = feature_at(prices, i)
-        lab = label_at(prices, i, horizon)
-        if lab < 0:
-            continue
+        if regression:
+            fut = prices[i + horizon] / prices[i] - 1.0
+            lab = NormalizeReturn(futures, fut) / 100.0
+        else:
+            lab = label_at(prices, i, horizon)
+            if lab < 0:
+                continue
         X.append(f)
         y.append(lab)
     if not X:
@@ -150,15 +190,29 @@ def cnn_image(prices: np.ndarray, i: int, lookback: int) -> np.ndarray:
     return img.reshape(L, L, 1)
 
 
-def make_cnn_dataset(prices: np.ndarray, lookback: int, horizon: int):
-    """构造 CNN 训练集 (X, y)：每个样本是位置 i 的 L×L 价格图，标签为未来 horizon 日涨跌。"""
+def make_cnn_dataset(prices: np.ndarray, lookback: int, horizon: int, regression: bool = False):
+    """构造 CNN 训练集 (X, y)：每个样本是位置 i 的 L×L 价格图。
+
+    regression=False（默认，分类）：标签 = 未来 horizon 日涨跌 (1=涨 / 0=跌)。
+    regression=True （回归）：标签 = NormalizeReturn(训练集涨幅分布, 未来 horizon 日涨幅) / 100，
+        即「该涨幅在训练集涨幅分布中的百分位(0~100%)」再缩到 [0,1]，作为胜率 P
+        （训练集涨幅分布内 Rank：r<0→0，r>=0→百分位）。误差用 mse 训练。
+    """
     X, y = [], []
     L = lookback
     n = len(prices)
+    # 先收集训练集里所有样本的「未来 horizon 日涨幅」，用于回归模式的 Rank 百分位归一化
+    futures = np.array(
+        [prices[i + horizon] / prices[i] - 1.0 for i in range(L - 1, n - horizon)],
+        dtype=float,
+    )
     for i in range(L - 1, n - horizon):
-        lab = label_at(prices, i, horizon)
-        if lab < 0:
-            continue
+        fut = prices[i + horizon] / prices[i] - 1.0
+        if regression:
+            # 用训练集全部涨幅的 Rank 百分位归一化（r<0→0），再 /100 缩到 [0,1] 喂给 sigmoid
+            lab = NormalizeReturn(futures, fut) / 100.0
+        else:
+            lab = 1 if fut > 0 else 0
         X.append(cnn_image(prices, i, L))
         y.append(lab)
     if not X:
@@ -167,7 +221,14 @@ def make_cnn_dataset(prices: np.ndarray, lookback: int, horizon: int):
 
 
 class AIStrategy(CtaTemplate):
-    """随机森林 AI 择时策略（凯利百分比仓位：target% = kelly_scale*(p_up-(1-p_up))，带追踪止损）"""
+    """AI 择时策略（凯利百分比仓位：target% = kelly_scale*(p_up-(1-p_up))，带追踪止损）。
+
+    两种冻结模型：
+    - 分类模式 (regression=False)：模型输出涨跌概率 p_up∈[0,1]，凯利 f=2p-1。
+    - 回归模式 (regression=True)：RF 回归器 / CNN 输出 P=该 5 日涨幅在训练集「全部涨幅(含亏损)」中的 Rank 百分位(0~100%)，
+      再以 /100 作为胜率 p∈[0,1]，按凯利 f=2p-1 算仓位
+      （亏损排低百分位→小 P→空仓/做空；百分位越高仓位越重；满百分位→满仓）。
+    """
 
     author = "demo-ai"
 
@@ -187,6 +248,8 @@ class AIStrategy(CtaTemplate):
     model_path = "rf_model.joblib"  # 固定模型文件（相对 ai_strategy.py 所在目录，或绝对路径）
     trade_start = ""       # 样本外测试起点 (YYYY-MM-DD)；留空=不限制。该日之前只预热积累特征、不交易
     model_type = "rf"      # 冻结模型类型：rf=随机森林(13维特征)；cnn=2D CNN(价格图)。加载模型时由 blob 覆盖
+    regression = False     # 回归模式：CNN 输出为归一化 5 日涨幅 P∈[0,1]（而非涨跌概率）。
+                           # 回测时用凯利定律 f=2P-1 把 P 换算成仓位比例。加载模型时由 blob 覆盖
 
     # 变量
     p_up = 0.0
@@ -205,6 +268,7 @@ class AIStrategy(CtaTemplate):
         "lookback", "horizon", "min_train", "retrain_interval",
         "threshold", "allow_short", "kelly_scale", "max_position", "use_kelly",
         "stop_loss_pct", "trailing_pct", "fixed_model", "model_path", "trade_start",
+        "regression",
     ]
     variables = [
         "p_up", "target_pct", "model_trained", "entry_price",
@@ -324,6 +388,7 @@ class AIStrategy(CtaTemplate):
         blob = joblib.load(path)
         self.model_type = blob.get("model_type", "rf")
         self.n_features_ = int(blob.get("n_features", 0))
+        self.regression = bool(blob.get("regression", False))
         if self.model_type == "cnn":
             # CNN 模型：从 config+weights 重建 keras 模型（joblib 不存原始 model 对象）
             import tensorflow as tf
@@ -333,7 +398,8 @@ class AIStrategy(CtaTemplate):
             self.lookback = int(blob.get("lookback", self.lookback))
             self.write_log(
                 f"已加载 CNN 固定模型: {os.path.basename(path)} "
-                f"(输入 {self.lookback}x{self.lookback} 价格图, 训练源={blob.get('source')})"
+                f"(输入 {self.lookback}x{self.lookback} 价格图, 训练源={blob.get('source')}, "
+                f"回归模式={'是' if self.regression else '否'})"
             )
         else:
             self.model = blob["model"]
@@ -417,13 +483,19 @@ class AIStrategy(CtaTemplate):
             return
 
         if self.model_type == "cnn":
-            # 纯 AI CNN：把最近 lookback 根收盘价铺成 L×L 价格图，直接推理涨跌概率
+            # 纯 AI CNN：把最近 lookback 根收盘价铺成 L×L 价格图，直接推理
             if n < self.lookback:
                 return
             X = cnn_image(prices, n - 1, self.lookback)        # (L, L, 1)
             X = np.expand_dims(X, axis=0)                       # (1, L, L, 1) 加 batch 维
-            proba = self.model.predict(X, verbose=0)[0]
-            self.p_up = float(proba[1]) if len(proba) > 1 else 0.5
+            pred = self.model.predict(X, verbose=0)
+            if self.regression:
+                # 回归模式：CNN 输出单值 = 该 5 日涨幅在「训练集全部涨幅(含亏损)」中的 Rank 百分位(0~100%)，
+                # 已 /100 落在 [0,1]，直接作为凯利胜率 p（亏损排低百分位→小 P；百分位越高仓位越重）。
+                self.p_up = float(np.clip(np.squeeze(pred), 0.0, 1.0))
+            else:
+                proba = np.squeeze(pred)
+                self.p_up = float(proba[1]) if len(proba) > 1 else 0.5
         else:
             feat = feature_at(prices, n - 1)
             # 固定模型模式下校验特征维数一致，避免训练/推理错位
@@ -432,8 +504,14 @@ class AIStrategy(CtaTemplate):
                     f"特征维数不匹配: 推理 {len(feat)} != 模型 {self.n_features_}，跳过本根"
                 )
                 return
-            proba = self.model.predict_proba(feat.reshape(1, -1))[0]
-            self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
+            if self.regression:
+                # 回归模式：RF 回归器直接输出 P = 训练集涨幅 Rank 百分位(0~1)，
+                # 作为凯利胜率 p（亏损排低百分位→小 P；百分位越高仓位越重）。
+                val = float(self.model.predict(feat.reshape(1, -1))[0])
+                self.p_up = float(np.clip(val, 0.0, 1.0))
+            else:
+                proba = self.model.predict_proba(feat.reshape(1, -1))[0]
+                self.p_up = float(proba[1]) if proba.shape[0] > 1 else 0.5
 
         # 样本外测试起点之前：仅预热，不参与交易（杜绝用测试期数据做决策/训练）
         if self.trade_start_dt is not None:

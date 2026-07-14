@@ -33,21 +33,25 @@ import sys
 
 import joblib
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ai_strategy import make_dataset, make_cnn_dataset
+from ai_strategy import make_dataset, make_cnn_dataset, NormalizeReturn
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def build_cnn_model(L: int):
-    """纯 AI 2D CNN：输入 L×L 价格图，输出未来 horizon 日涨跌的 2 类概率。
+def build_cnn_model(L: int, regression: bool = False):
+    """纯 AI 2D CNN：输入 L×L 价格图。
 
-    结构（比初版更深、更稳，仍不依赖任何手工技术指标，由 CNN 自己从价格图学形态）：
+    regression=False（分类，默认）：输出未来 horizon 日涨跌的 2 类概率（softmax）。
+    regression=True （回归）：输出单值 P = NormalizeReturn(5日涨幅) ∈ [0,1]（sigmoid），
+        训练用 mse 损失，回测时按凯利 f=2P-1 换算仓位。
+
+    结构（纯 AI、无手工技术指标，由 CNN 自己从价格图学形态）：
       Conv2D(32,3)+BN → MaxPool → Conv2D(64,3)+BN → MaxPool
-      → Conv2D(64,3)+BN → GlobalAveragePool → Dense(64)+BN → Dropout(0.4) → Dense(2,softmax)
-    训练用 Adam(lr=1e-3) + ReduceLROnPlateau，早停在 val_accuracy 不提升时触发。
+      → Conv2D(64,3)+BN → GlobalAveragePool → Dense(64)+BN → Dropout(0.4) → 输出层
+    训练用 Adam(lr=1e-3) + ReduceLROnPlateau，早停：分类看 val_accuracy，回归看 val_loss。
     """
     import tensorflow as tf
     from tensorflow.keras import Sequential
@@ -70,13 +74,20 @@ def build_cnn_model(L: int):
         Dense(64, activation="relu"),
         BatchNormalization(),
         Dropout(0.4),
-        Dense(2, activation="softmax"),
+        Dense(1, activation="sigmoid") if regression else Dense(2, activation="softmax"),
     ])
-    m.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],
-    )
+    if regression:
+        m.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+            loss="mse",
+            metrics=["mae"],
+        )
+    else:
+        m.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+        )
     return m
 
 
@@ -108,6 +119,12 @@ def main() -> None:
              "cnn=纯AI 2D CNN(最近 lookback 根收盘价铺成价格图, 无手工特征)。",
     )
     ap.add_argument(
+        "--regression", action="store_true",
+        help="回归模式（CNN / RF 均适用）：标签=NormalizeReturn(5日涨幅)∈[0,1] 作为胜率 P，"
+             "RF 用 RandomForestRegressor、CNN 用单值 sigmoid；回测按凯利 f=2P-1 算仓位。"
+             "默认关闭(分类涨跌)。",
+    )
+    ap.add_argument(
         "--epochs", type=int, default=20,
         help="仅 CNN 训练用：训练轮数（默认 20）。",
     )
@@ -131,20 +148,27 @@ def main() -> None:
     )
 
     if args.model_type == "cnn":
-        X, y = make_cnn_dataset(prices, args.lookback, args.horizon)
+        X, y = make_cnn_dataset(prices, args.lookback, args.horizon, regression=args.regression)
     else:
-        X, y = make_dataset(prices, args.lookback, args.horizon)
+        X, y = make_dataset(prices, args.lookback, args.horizon, regression=args.regression)
     if len(X) < 30:
         raise RuntimeError("样本不足，无法训练（至少需要 30 条）")
-    print(f"训练样本 X={X.shape}, 正类(涨)占比={y.mean():.2%}")
+    if args.regression:
+        print(f"训练样本 X={X.shape}, 回归标签=训练集涨幅 Rank 百分位/100 "
+              f"均值={y.mean():.4f} 中位数={np.median(y):.4f} "
+              f"(即训练集内涨幅分位：0=跌, 1=最大涨幅)")
+        print(f"（标签范围 {y.min():.4f} ~ {y.max():.4f}，说明 Rank 覆盖整个训练分布）")
+    else:
+        print(f"训练样本 X={X.shape}, 正类(涨)占比={y.mean():.2%}")
 
     trained_at = datetime.datetime.now().isoformat(timespec="seconds")
     if args.model_type == "cnn":
         from tensorflow.keras.callbacks import (
             EarlyStopping, ReduceLROnPlateau, TerminateOnNaN,
         )
-        model = build_cnn_model(args.lookback)
-        print(f"CNN 训练开始（epochs={args.epochs}, 输入 {args.lookback}x{args.lookback} 价格图）...")
+        model = build_cnn_model(args.lookback, regression=args.regression)
+        print(f"CNN 训练开始（epochs={args.epochs}, 输入 {args.lookback}x{args.lookback} 价格图, "
+              f"{'回归(归一化5日涨幅)' if args.regression else '分类(涨跌)'}）...")
         model.fit(
             X, y,
             epochs=args.epochs,
@@ -152,9 +176,12 @@ def main() -> None:
             validation_split=0.15,
             verbose=2,
             callbacks=[
-                EarlyStopping(monitor="val_accuracy", mode="max",
-                              patience=10, restore_best_weights=True,
-                              min_delta=0.005),
+                EarlyStopping(
+                    monitor="val_loss" if args.regression else "val_accuracy",
+                    mode="min" if args.regression else "max",
+                    patience=10, restore_best_weights=True,
+                    min_delta=0.005,
+                ),
                 ReduceLROnPlateau(monitor="val_loss", factor=0.5,
                                   patience=5, min_lr=1e-5, verbose=1),
                 TerminateOnNaN(),
@@ -163,6 +190,8 @@ def main() -> None:
         print("CNN 训练完成（固定参数，不再重训）")
         meta = {
             "model_type": "cnn",
+            "regression": bool(args.regression),
+            "normalization": "rank_percentile_train",  # 标签=训练集涨幅 Rank 百分位/100
             "model_config": model.to_json(),
             "model_weights": model.get_weights(),
             "n_features": int(args.lookback),
@@ -174,22 +203,43 @@ def main() -> None:
         }
         prefix = "cnn_model"
     else:
-        model = RandomForestClassifier(
-            n_estimators=50, max_depth=5, random_state=42, n_jobs=-1
-        )
-        model.fit(X, y)
-        print("随机森林训练完成（固定参数，不再重训）")
-        meta = {
-            "model_type": "rf",
-            "model": model,
-            "n_features": int(X.shape[1]),
-            "lookback": args.lookback,
-            "horizon": args.horizon,
-            "source": args.source,
-            "train_end": args.train_end,
-            "trained_at": trained_at,
-        }
-        prefix = "rf_model"
+        if args.regression:
+            model = RandomForestRegressor(
+                n_estimators=300, max_depth=10, min_samples_leaf=10,
+                random_state=42, n_jobs=-1,
+            )
+            model.fit(X, y)
+            print("随机森林(回归/Rank 胜率)训练完成（固定参数，不再重训）")
+            meta = {
+                "model_type": "rf",
+                "regression": True,
+                "normalization": "rank_percentile_train",
+                "model": model,
+                "n_features": int(X.shape[1]),
+                "lookback": args.lookback,
+                "horizon": args.horizon,
+                "source": args.source,
+                "train_end": args.train_end,
+                "trained_at": trained_at,
+            }
+            prefix = "rf_ret_model"
+        else:
+            model = RandomForestClassifier(
+                n_estimators=50, max_depth=5, random_state=42, n_jobs=-1
+            )
+            model.fit(X, y)
+            print("随机森林训练完成（固定参数，不再重训）")
+            meta = {
+                "model_type": "rf",
+                "model": model,
+                "n_features": int(X.shape[1]),
+                "lookback": args.lookback,
+                "horizon": args.horizon,
+                "source": args.source,
+                "train_end": args.train_end,
+                "trained_at": trained_at,
+            }
+            prefix = "rf_model"
 
     # 决定输出路径
     if args.out:
@@ -198,8 +248,6 @@ def main() -> None:
         out = os.path.join(HERE, f"{prefix}_{args.source}_{args.train_end}.joblib")
     else:
         out = os.path.join(HERE, f"{prefix}.joblib")
-    if not os.path.isabs(out):
-        out = os.path.join(HERE, out)
 
     joblib.dump(meta, out)
     print(f"固定模型已保存: {out}")

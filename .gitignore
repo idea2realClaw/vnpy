@@ -44,3 +44,6 @@ lab/
 
 # WorkBuddy project memory (local only, never commit)
 .workbuddy/
+
+# Debug scratch file (never commit)
+_debug_pup.py

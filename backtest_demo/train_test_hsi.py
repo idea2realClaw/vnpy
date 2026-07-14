@@ -55,9 +55,11 @@ def _run(cmd: list) -> None:
         raise SystemExit(f"子命令失败（exit={rc}）: {' '.join(cmd)}")
 
 
-def phase_train(source: str, train_end: str, model_out: str, model_type: str = "rf") -> dict:
+def phase_train(source: str, train_end: str, model_out: str, model_type: str = "rf",
+                regression: bool = False) -> dict:
     _banner(f"阶段一  TRAIN  ▶ 只训练 {source} 在 {train_end}（含）之前的数据"
-            + ("（纯AI CNN）" if model_type == "cnn" else "（随机森林）"))
+            + ("（纯AI CNN" + ("·回归(归一化5日涨幅)" if regression else "·分类(涨跌)") + "）"
+               if model_type == "cnn" else "（随机森林）"))
     out_path = model_out if os.path.isabs(model_out) else os.path.join(HERE, model_out)
     cmd = [
         sys.executable, os.path.join(HERE, "train_model.py"),
@@ -66,6 +68,8 @@ def phase_train(source: str, train_end: str, model_out: str, model_type: str = "
     ]
     if model_type == "cnn":
         cmd += ["--epochs", "60"]
+        if regression:
+            cmd += ["--regression"]
     _run(cmd)
     blob = joblib.load(out_path)
     meta = {k: v for k, v in blob.items() if k != "model"}
@@ -103,7 +107,12 @@ def main() -> None:
                     help="跳过训练，直接复用已存在的干净模型做测试")
     ap.add_argument("--no-kelly", action="store_true",
                     help="去掉凯利百分比仓位，改用二值仓位(满仓100%/空仓0%)")
+    ap.add_argument("--no-regression", action="store_true",
+                    help="CNN 退化为分类(涨跌)模式（默认 CNN 即回归：归一化5日涨幅→凯利仓位）")
     args = ap.parse_args()
+
+    # 默认 CNN 即回归模式（归一化5日涨幅→凯利仓位）；rf 恒为分类。--no-regression 可关。
+    regression = (args.model_type == "cnn") and (not args.no_regression)
 
     train_end_dt = datetime.datetime.strptime(args.train_end, "%Y-%m-%d").date()
     test_start_dt = datetime.datetime.strptime(args.test_start, "%Y-%m-%d").date()
@@ -116,7 +125,10 @@ def main() -> None:
             f"请增大间隔（如 train_end=2021-12-31, test-start=2022-01-01）。"
         )
 
-    prefix = "cnn_model" if args.model_type == "cnn" else "rf_model"
+    if args.model_type == "cnn":
+        prefix = "cnn_ret_model" if regression else "cnn_model"
+    else:
+        prefix = "rf_model"
     model_out = args.model_out or f"{prefix}_{args.source}_{args.train_end}.joblib"
     out_path = model_out if os.path.isabs(model_out) else os.path.join(HERE, model_out)
 
@@ -134,7 +146,8 @@ def main() -> None:
         for k, v in meta.items():
             print(f"  {k}: {v}")
     else:
-        meta = phase_train(args.source, args.train_end, model_out, model_type=args.model_type)
+        meta = phase_train(args.source, args.train_end, model_out,
+                           model_type=args.model_type, regression=regression)
         # 二次校验：模型自身记录的 train_end 必须早于测试起点
         mte = meta.get("train_end")
         if mte:
