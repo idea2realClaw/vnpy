@@ -235,6 +235,7 @@ class AIStrategy(CtaTemplate):
     # 参数
     lookback = 60          # 特征所需最少历史根数
     horizon = 5            # 预测未来 N 日涨跌
+    hold_period = 5        # 持仓持有根数：开仓后持有这么多根 bar 再重新决策；默认=horizon，与训练标签（未来 N 日涨跌）对齐；设 1 退化回每日调仓
     min_train = 250        # 至少积累这么多根才开始交易
     retrain_interval = 20  # 每多少根 bar 滚动重训一次
     threshold = 0.5        # 涨概率阈值
@@ -268,7 +269,7 @@ class AIStrategy(CtaTemplate):
         "lookback", "horizon", "min_train", "retrain_interval",
         "threshold", "allow_short", "kelly_scale", "max_position", "use_kelly",
         "stop_loss_pct", "trailing_pct", "fixed_model", "model_path", "trade_start",
-        "regression",
+        "regression", "hold_period",
     ]
     variables = [
         "p_up", "target_pct", "model_trained", "entry_price",
@@ -291,6 +292,7 @@ class AIStrategy(CtaTemplate):
         self.realized_pnl = 0.0
         self.avg_cost = 0.0
         self.target_pct = 0.0
+        self.bars_held = 0       # 当前持仓已持有的根数（配合 hold_period）
 
     def get_target_pct(self, p_up: float) -> float:
         """目标仓位比例（占总权益）。
@@ -461,6 +463,26 @@ class AIStrategy(CtaTemplate):
                 self._reset_position_state()
                 return
 
+        # 持仓持有期（与训练 horizon 对齐）：开仓后持有 hold_period 根 bar 再重新决策，
+        # 避免“用未来 N 日标签训练、却每天换仓”的错配。
+        #   hold_period == 1：每天重新决策，pos 跨天持续持有 —— 完全等价于旧的每日调仓逻辑，
+        #                    这样可以用 hold_period=1 精确还原改动前的旧绩效，做对照。
+        #   hold_period  > 1：持有期内不调仓、不重新预测；到第 hold_period 根收盘平仓，
+        #                    本根不再决策，下一根再重新开仓（持有期严格 = hold_period 根）。
+        if self.pos != 0 and self.hold_period > 1:
+            self.bars_held += 1
+            if self.bars_held >= self.hold_period:
+                # 持有到期：先平仓，本根不再重新决策，等下一根再开仓（逻辑最干净）
+                if self.pos > 0:
+                    self.sell(bar.close_price, abs(self.pos))
+                else:
+                    self.buy(bar.close_price, abs(self.pos))
+                self._reset_position_state()
+                self.bars_held = 0
+                return
+            else:
+                return  # 持有期内不调仓、不重新预测
+
         # 滚动重训（walk-forward）——仅在非固定模型模式下执行
         if not self.fixed_model:
             self.bars_since_train += 1
@@ -581,3 +603,4 @@ class AIStrategy(CtaTemplate):
         self.peak_price = 0.0
         self.trough_price = 0.0
         self.stop_price = 0.0
+        self.bars_held = 0

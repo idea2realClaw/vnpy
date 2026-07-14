@@ -130,9 +130,11 @@ def compute_window_stats(df: pd.DataFrame, test_start_dt: datetime):
 
 
 def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None,
-                 use_kelly: bool = True) -> None:
+                 use_kelly: bool = True, out_name: str = None,
+                 hold_period: int = 5) -> None:
     vt_symbol = f"{cfg['symbol']}.{cfg['exchange'].value}"
     name = cfg["name"]
+    base = out_name or f"frozen_{cfg['symbol']}"
     test_start_dt = None
     if test_start:
         test_start_dt = datetime.strptime(test_start, "%Y-%m-%d")
@@ -161,6 +163,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
             "stop_loss_pct": 0.05, "trailing_pct": 0.05,
             "fixed_model": True, "model_path": model_path,
             "trade_start": test_start or "",
+            "hold_period": hold_period,
         },
     )
     engine.load_data()
@@ -173,7 +176,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
         print("无回测数据，结束")
         return
 
-    csv_path = os.path.join(HERE, f"frozen_{cfg['symbol']}_daily_result.csv")
+    csv_path = os.path.join(HERE, f"{base}_daily_result.csv")
     df.to_csv(csv_path)
     print(f"每日资金曲线已导出: {csv_path}")
 
@@ -246,7 +249,7 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
                 x=test_start_dt, line_dash="dash", line_color="#d62728",
                 annotation_text="测试起点", annotation_position="top left",
             )
-        html_path = os.path.join(HERE, f"frozen_{cfg['symbol']}_chart.html")
+        html_path = os.path.join(HERE, f"{base}_chart.html")
         fig.write_html(html_path)
 
         # 最近一周持仓表格，插入到 HTML 最上方
@@ -327,6 +330,14 @@ def main() -> None:
         "--no-kelly", action="store_true",
         help="去掉凯利百分比仓位，改用二值仓位：p>=threshold 满仓(100%)/否则空仓(0%)。",
     )
+    ap.add_argument(
+        "--hold-period", type=int, default=5,
+        help="持仓持有根数：开仓后持有多少根 bar 再重新决策；默认 5（=horizon，与训练标签对齐）；设 1 退化为每日调仓。",
+    )
+    ap.add_argument(
+        "--out-name", default=None,
+        help="输出文件基名（不含后缀），如 rf_rank_kelly；默认 frozen_<symbol>。",
+    )
     args = ap.parse_args()
 
     model_path = MODEL_PATH
@@ -340,6 +351,7 @@ def main() -> None:
     run_backtest(
         cfg, model_path=model_path, test_start=args.test_start,
         use_kelly=not args.no_kelly,
+        out_name=args.out_name, hold_period=args.hold_period,
     )
 
 

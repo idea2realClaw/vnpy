@@ -14,16 +14,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # 策略顺序（循环互链）。metrics = 顶部状态栏显示的概要。
 STRATEGY_NAV = [
-    ("RF 二值（旧干净模型）", "frozen_HSI_rf_binary_chart.html",
-     "样本外 +11.68% ｜ 超额 +7.81% ｜ Sharpe 0.225 ｜ 回撤 -46.72% ｜ 55 笔"),
-    ("RF Rank 凯利版", "frozen_HSI_rf_rank_kelly_chart.html",
-     "样本外 +5.96% ｜ 超额 +1.93% ｜ Sharpe 0.265 ｜ 回撤 -11.74% ｜ 69 笔"),
-    ("RF Rank 二值版", "frozen_HSI_rf_rank_binary_chart.html",
-     "样本外 +34.70% ｜ 年化 6.80% ｜ Sharpe 0.265 ｜ 回撤 -33.73% ｜ 52 笔"),
-    ("CNN 回归（扁平·无信号）", "frozen_HSI_cnn_flat_chart.html",
-     "0% ｜ 0 笔交易（2D 价格图 CNN 无信号）"),
-    ("Oracle 上界（理论·非真实）", "oracle_ceiling_chart.html",
-     "+9810% ｜ 用未来信息的理论上界"),
+    ("RF 二值（旧干净模型·持有5天）", "rf_binary_chart.html",
+     "样本外 −21.71% ｜ 超额 −25.75% ｜ Sharpe −0.181 ｜ 回撤 −46.36% ｜ 104 笔"),
+    ("RF Rank 凯利版（持有5天）", "rf_rank_kelly_chart.html",
+     "样本外 +5.41% ｜ 超额 +1.38% ｜ Sharpe 0.260 ｜ 回撤 −10.13% ｜ 108 笔"),
+    ("RF Rank 二值版（持有5天）", "rf_rank_binary_chart.html",
+     "样本外 −10.68% ｜ 超额 −14.71% ｜ Sharpe −0.035 ｜ 回撤 −44.60% ｜ 110 笔"),
 ]
 
 
