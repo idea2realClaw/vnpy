@@ -14,12 +14,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # 策略顺序（循环互链）。metrics = 顶部状态栏显示的概要。
 STRATEGY_NAV = [
-    ("RF 二值（旧干净模型·持有5天）", "rf_binary_chart.html",
-     "样本外 −21.71% ｜ 超额 −25.75% ｜ Sharpe −0.181 ｜ 回撤 −46.36% ｜ 104 笔"),
-    ("RF Rank 凯利版（持有5天）", "rf_rank_kelly_chart.html",
-     "样本外 +5.41% ｜ 超额 +1.38% ｜ Sharpe 0.260 ｜ 回撤 −10.13% ｜ 108 笔"),
-    ("RF Rank 二值版（持有5天）", "rf_rank_binary_chart.html",
-     "样本外 −10.68% ｜ 超额 −14.71% ｜ Sharpe −0.035 ｜ 回撤 −44.60% ｜ 110 笔"),
+    ("RF 二值（h60·每天调仓）", "rf_binary_chart.html",
+     "样本外 −0.43% ｜ 超额 −4.47% ｜ Sharpe 0.115 ｜ 回撤 −45.35% ｜ 37 笔"),
+    ("RF Rank 凯利版（h60·每天调仓）", "rf_rank_kelly_chart.html",
+     "样本外 +0.20% ｜ 超额 −3.84% ｜ Sharpe 0.072 ｜ 回撤 −36.50% ｜ 51 笔"),
+    ("RF Rank 二值版（h60·每天调仓）", "rf_rank_binary_chart.html",
+     "样本外 +29.75% ｜ 超额 +25.72% ｜ Sharpe 0.367 ｜ 回撤 −41.94% ｜ 30 笔"),
 ]
 
 
@@ -34,8 +34,9 @@ def inject() -> None:
             continue
         html = open(path, encoding="utf-8").read()
         if 'id="strat-nav"' in html:
-            print("已含导航，跳过:", fn)
-            continue
+            # 已含旧导航：先移除再重注（保证指标更新生效）
+            html = re.sub(r'<div id="strat-nav".*?</div>', '', html, count=1)
+            print("已含旧导航，移除后重注:", fn)
         nav = (
             '<div id="strat-nav" style="position:fixed;top:0;left:0;right:0;z-index:99999;'
             'background:rgba(31,41,55,0.96);color:#e5e7eb;'
