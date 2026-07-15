@@ -12,19 +12,14 @@ ECHO.
 :: 0) 升级 pip / wheel
 ECHO [0/3] 升级 pip / wheel ...
 %python% -m pip install --upgrade pip wheel
-SET RC=%ERRORLEVEL%
+IF ERRORLEVEL 1 (ECHO [错误] pip 升级失败 & PAUSE & EXIT /B 1)
 PAUSE
-IF %RC% NEQ 0 (ECHO [错误] pip 升级失败 & PAUSE & EXIT /B 1)
 
 :: 1) 优先：使用 VeighNa 私有源里的预编译 ta_lib 轮子（无需单独装 C 库）
 ECHO [1/3] 尝试从 pypi.vnpy.com 安装预编译 ta_lib 轮子 ...
 %python% -m pip install ta_lib==0.6.4 --extra-index-url https://pypi.vnpy.com
-SET RC=%ERRORLEVEL%
 PAUSE
-IF %RC%==0 (
-    ECHO [完成] ta_lib 已通过预编译轮子装好，import talib 应该可以直接用。
-    GOTO :verify
-)
+IF NOT ERRORLEVEL 1 GOTO :verify
 
 :: 2) 回退：安装官方 TA-Lib C 库 (MSVC 预编译) 到 C:\ta-lib，再从公网装 python 包
 ECHO [2/3] 预编译轮子不可用，改为安装官方 TA-Lib C 库 ...
@@ -37,15 +32,13 @@ IF EXIST "%TA_LIB_DIR%\c\include\ta_lib.h" (
 ) ELSE (
     ECHO 正在下载 TA-Lib C 库 (MSVC) ...
     powershell -Command "Invoke-WebRequest -Uri '%TA_URL%' -OutFile '%TA_ZIP%'"
-    SET RC=%ERRORLEVEL%
-    PAUSE
-    IF %RC% NEQ 0 (ECHO [错误] 下载失败 & PAUSE & EXIT /B 1)
+    IF ERRORLEVEL 1 (ECHO [错误] 下载失败 & PAUSE & EXIT /B 1)
     IF NOT EXIST "%TA_ZIP%" (ECHO [错误] 未找到下载文件 & PAUSE & EXIT /B 1)
+    PAUSE
     ECHO 正在解压到 %TA_LIB_DIR% ...
     powershell -Command "Expand-Archive -Path '%TA_ZIP%' -DestinationPath 'C:\' -Force"
-    SET RC=%ERRORLEVEL%
+    IF ERRORLEVEL 1 (ECHO [错误] 解压失败 & PAUSE & EXIT /B 1)
     PAUSE
-    IF %RC% NEQ 0 (ECHO [错误] 解压失败 & PAUSE & EXIT /B 1)
     IF NOT EXIST "%TA_LIB_DIR%\c\include\ta_lib.h" (
         ECHO [错误] 解压后未找到 %TA_LIB_DIR%\c\include\ta_lib.h & PAUSE & EXIT /B 1
     )
@@ -59,17 +52,15 @@ ECHO 设置 TA_INCLUDE_PATH=%TA_INCLUDE_PATH%
 
 ECHO 正在安装 TA-Lib python 包 (公网 PyPI) ...
 %python% -m pip install TA-Lib==0.6.4
-SET RC=%ERRORLEVEL%
+IF ERRORLEVEL 1 (ECHO [错误] TA-Lib python 包安装失败 & PAUSE & EXIT /B 1)
 PAUSE
-IF %RC% NEQ 0 (ECHO [错误] TA-Lib python 包安装失败 & PAUSE & EXIT /B 1)
 ECHO [提示] 若运行时仍报找不到模块，请确认 C:\ta-lib 存在，或将上面两个环境变量加入系统环境变量。
 
 :verify
 ECHO [3/3] 验证 import talib ...
 %python% -c "import talib; print('talib', talib.__version__, 'OK')"
-SET RC=%ERRORLEVEL%
+IF ERRORLEVEL 1 (ECHO [失败] import talib 仍不可用，请查看上方报错 & PAUSE & EXIT /B 1)
 PAUSE
-IF %RC% NEQ 0 (ECHO [失败] import talib 仍不可用，请查看上方报错 & PAUSE & EXIT /B 1)
 
 ECHO.
 ECHO ==========================================================
