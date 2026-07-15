@@ -253,6 +253,8 @@ bash install.sh
 bash install_osx.sh
 ```
 
+> **TA-Lib 依赖**：VeighNa 的 `ArrayManager` 与 `alpha` 模块在运行时依赖 TA-Lib 的 C 库。若 `import vnpy` 报 `No module named 'talib'`，请先安装 TA-Lib C 库，详见 [docs/install_talib.md](docs/install_talib.md) 或运行 `install_talib.bat`（Windows）/ `bash install_talib.sh`（Linux/macOS）。
+
 ## 使用指南
 
 1. 在[SimNow](http://www.simnow.com.cn/)注册CTP仿真账号，并在[该页面](http://www.simnow.com.cn/product.action)获取经纪商代码以及交易行情服务器地址。
