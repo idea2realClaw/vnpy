@@ -1,9 +1,10 @@
 """用“固定模型”对任意标的做回测推理（不再重新训练）。
 
 用法（在仓库根目录执行）：
-    # 预设：沪深300 / 恒生指数
+    # 预设：沪深300 / 恒生指数 / 标普500
     /tmp/btvenv/bin/python backtest_demo/run_any_backtest.py --target CSI300
     /tmp/btvenv/bin/python backtest_demo/run_any_backtest.py --target HSI
+    /tmp/btvenv/bin/python backtest_demo/run_any_backtest.py --target SPY --no-fetch
 
     # 任意 A 股指数（新浪源），例如上证50 / 创业板指
     /tmp/btvenv/bin/python backtest_demo/run_any_backtest.py \
@@ -16,7 +17,8 @@
     2) 数据会自动抓取并写入 vnpy SQLite（A股用 akshare 新浪源，HSI 用新浪原始解码）
 说明：
     模型固定（fixed_model=True），回测期间不再 walk-forward 重训；
-    特征全为无量纲量，故一个在 HSI 上训好的模型可迁移到 CSI300 等其它标的。
+    特征全为无量纲量，故一个在 HSI 上训好的模型可迁移到 CSI300 / SPY 等其它标的。
+    --no-fetch：跳过数据抓取，直接使用数据库中已有数据（多标的复测时避免重复联网）。
 依赖：vnpy_ctastrategy / vnpy_sqlite / scikit-learn / akshare / plotly
 """
 import argparse
@@ -40,6 +42,7 @@ MODEL_PATH = os.path.join(HERE, "rf_model.joblib")
 PRESETS = {
     "CSI300": {"symbol": "000300", "exchange": Exchange.SSE, "source": "csi300", "name": "沪深300"},
     "HSI": {"symbol": "HSI", "exchange": Exchange.SEHK, "source": "hsi_yf", "name": "恒生指数"},
+    "SPY": {"symbol": "SPY", "exchange": Exchange.SMART, "source": "spy", "name": "标普500"},
 }
 
 
@@ -47,8 +50,15 @@ def _exchange_from_str(s: str) -> Exchange:
     return {"SSE": Exchange.SSE, "SZSE": Exchange.SZSE, "SEHK": Exchange.SEHK}[s.upper()]
 
 
-def ensure_data(cfg: dict) -> None:
-    """抓取并写入数据库，确保回测引擎能 load_data。"""
+def ensure_data(cfg: dict, no_fetch: bool = False) -> None:
+    """抓取并写入数据库，确保回测引擎能 load_data。
+
+    no_fetch=True 时跳过抓取，直接使用数据库中已有数据（多标的复测避免重复联网）。
+    """
+    if no_fetch:
+        print(f"[no-fetch] 跳过数据抓取，使用数据库中已有 "
+              f"{cfg['symbol']}.{cfg['exchange'].value} 数据")
+        return
     src = cfg["source"]
     if src == "csi300":
         import fetch_csi300
@@ -59,6 +69,33 @@ def ensure_data(cfg: dict) -> None:
     elif src == "hsi_yf":
         import fetch_hsi_yf
         fetch_hsi_yf.main()
+    elif src == "spy":
+        # 标普500 通过 yfinance 抓取（数据缺失时自动补齐；已存在时配合 --no-fetch 跳过）
+        import yfinance as yf
+        df = yf.download(
+            "SPY", start="2016-01-01",
+            end=datetime.now().strftime("%Y-%m-%d"),
+            auto_adjust=False, progress=False,
+        )
+        if df is None or df.empty:
+            raise RuntimeError("yfinance 未返回 SPY 数据，请检查网络")
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.reset_index()
+        df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize("UTC")
+        bars = [
+            BarData(
+                symbol="SPY", exchange=Exchange.SMART,
+                datetime=row["Date"].to_pydatetime(), interval=Interval.DAILY,
+                open_price=float(row["Open"]), high_price=float(row["High"]),
+                low_price=float(row["Low"]), close_price=float(row["Close"]),
+                volume=float(row.get("Volume", 0) or 0),
+                turnover=0.0, open_interest=0.0, gateway_name="YF_SPY",
+            )
+            for _, row in df.dropna(subset=["Close"]).iterrows()
+        ]
+        ok = get_database().save_bar_data(bars)
+        print(f"写入数据库 SPY: {'成功' if ok else '失败'} ({len(bars)} 根)")
     elif src == "akshare_index":
         import akshare as ak
         ak_code = cfg["ak_code"]
@@ -343,6 +380,10 @@ def main() -> None:
         "--prior-adjust", action="store_true",
         help="先验校正：把 RF 分类输出的涨概率去训练集先验偏置(P0)，并按 (1-P0) 二值化。仅影响 --no-kelly 分类路径。",
     )
+    ap.add_argument(
+        "--no-fetch", action="store_true",
+        help="跳过数据抓取，直接使用数据库中已有数据（多标的复测/离线跑避免重复联网）。",
+    )
     args = ap.parse_args()
 
     model_path = MODEL_PATH
@@ -352,7 +393,7 @@ def main() -> None:
         raise SystemExit(f"未找到固定模型 {model_path}，请先运行 train_model.py")
 
     cfg = build_cfg(args)
-    ensure_data(cfg)
+    ensure_data(cfg, no_fetch=args.no_fetch)
     run_backtest(
         cfg, model_path=model_path, test_start=args.test_start,
         use_kelly=not args.no_kelly,

@@ -13,13 +13,29 @@ import re
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # 策略顺序（循环互链）。metrics = 顶部状态栏显示的概要。
+# 全部使用 h10 冻结模型（HSI 2016–2021 训练，无重训），每天调仓(hold=1)，样本外测试。
 STRATEGY_NAV = [
-    ("RF 二值（h10·先验校正）", "rf_binary_prior_chart.html",
-     "样本外 +30.25%(与无校正等价) ｜ 超额 +26.21% ｜ Sharpe 0.466 ｜ 回撤 −21.83% ｜ 57 笔"),
-    ("RF Rank 凯利版（h10·每天调仓）", "rf_rank_kelly_chart.html",
+    # —— 恒生指数 HSI（OOS 2022-01-03~，买入持有 +4.03%）——
+    ("HSI · RF 二值（h10·分类）", "rf_binary_chart.html",
+     "样本外 +30.25% ｜ 超额 +26.21% ｜ Sharpe 0.466 ｜ 回撤 −21.83% ｜ 57 笔"),
+    ("HSI · RF Rank 凯利版（h10·回归）", "rf_rank_kelly_chart.html",
      "样本外 +8.58% ｜ 超额 +4.54% ｜ Sharpe 0.310 ｜ 回撤 −15.82% ｜ 73 笔"),
-    ("RF Rank 二值版（h10·每天调仓）", "rf_rank_binary_chart.html",
+    ("HSI · RF Rank 二值版（h10·回归）", "rf_rank_binary_chart.html",
      "样本外 −18.29% ｜ 超额 −22.32% ｜ Sharpe −0.136 ｜ 回撤 −47.74% ｜ 67 笔"),
+    # —— 沪深300 CSI300（OOS 2022-01-04~，买入持有 +8.90%）——
+    ("CSI300 · RF 二值（h10·分类）", "csi300_rf_binary_chart.html",
+     "样本外 +1.09% ｜ 超额 −7.81% ｜ Sharpe 0.091 ｜ 回撤 −30.88% ｜ 52 笔"),
+    ("CSI300 · RF Rank 凯利版（h10·回归）", "csi300_rf_rank_kelly_chart.html",
+     "样本外 +0.52% ｜ 超额 −8.38% ｜ Sharpe 0.049 ｜ 回撤 −8.88% ｜ 68 笔"),
+    ("CSI300 · RF Rank 二值版（h10·回归）", "csi300_rf_rank_binary_chart.html",
+     "样本外 +9.40% ｜ 超额 +0.50% ｜ Sharpe 0.219 ｜ 回撤 −24.84% ｜ 67 笔"),
+    # —— 标普500 SPY（OOS 2022-01-03~，买入持有 +67.24%）——
+    ("SPY · RF 二值（h10·分类）", "spy_rf_binary_chart.html",
+     "样本外 +49.66% ｜ 超额 −17.58% ｜ Sharpe 0.645 ｜ 回撤 −21.81% ｜ 87 笔"),
+    ("SPY · RF Rank 凯利版（h10·回归）", "spy_rf_rank_kelly_chart.html",
+     "样本外 +2.63% ｜ 超额 −64.61% ｜ Sharpe 0.167 ｜ 回撤 −5.21% ｜ 64 笔"),
+    ("SPY · RF Rank 二值版（h10·回归）", "spy_rf_rank_binary_chart.html",
+     "样本外 +35.53% ｜ 超额 −31.70% ｜ Sharpe 0.550 ｜ 回撤 −16.27% ｜ 61 笔"),
 ]
 
 
