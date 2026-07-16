@@ -33,12 +33,38 @@ import sys
 
 import joblib
 import numpy as np
+import pandas as pd
+import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_strategy import make_dataset, make_cnn_dataset, NormalizeReturn
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+YF_START = "2016-01-01"
+
+
+def resolve_yf_ticker(src: str) -> str:
+    """把训练/特征源名映射成 yfinance ticker；未知则原样当作 ticker。"""
+    m = {"HSI": "^HSI", "VIX": "^VIX", "SPY": "SPY"}
+    return m.get(src.upper() if src else src, src)
+
+
+def fetch_yf_prices(ticker: str, start: str, end: str = None):
+    """通过 yfinance 拉取日线收盘价，返回 (dates: list[date], prices: np.ndarray)。"""
+    print(f"  yfinance 拉取 {ticker} ({start} ~ {end or '今'}) ...")
+    df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
+    if df is None or df.empty:
+        raise RuntimeError(f"yfinance 未返回 {ticker} 数据，请检查代码或网络")
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df.reset_index()
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.dropna(subset=["Close"]).reset_index(drop=True)
+    dates = [d.date() for d in df["Date"]]
+    prices = np.array(df["Close"].astype(float).values, dtype=float)
+    return dates, prices
 
 
 def build_cnn_model(L: int, regression: bool = False):
@@ -133,24 +159,69 @@ def main() -> None:
         help="模型输出路径。默认 rf_model.joblib(或 cnn_model.joblib)；"
              "指定 --train-end 且未给 --out 时自动命名为 <类型>_model_<source>_<train-end>.joblib。",
     )
+    ap.add_argument(
+        "--feature-source", default=None,
+        help="特征源标的（yfinance ticker 别名，如 VIX 表示 ^VIX）。指定后进入「跨标的」模式："
+             "特征来自该标的序列，标签来自 --source（如 SPY）序列，二者按日期对齐。"
+             "不指定则特征=标签=--source（单序列，向后兼容）。",
+    )
     args = ap.parse_args()
 
-    bars = get_bars(args.source)
-    if args.train_end:
-        te = datetime.datetime.strptime(args.train_end, "%Y-%m-%d").date()
-        bars = [b for b in bars if b.datetime.date() <= te]
-        print(f"训练数据已截断到 {args.train_end}（仅用此日及之前，之后留作样本外）")
-
-    prices = np.array([float(b.close_price) for b in bars], dtype=float)
-    print(
-        f"训练源 {args.source}: {len(prices)} 根日线, "
-        f"区间 {bars[0].datetime.date()} ~ {bars[-1].datetime.date()}"
-    )
-
-    if args.model_type == "cnn":
-        X, y = make_cnn_dataset(prices, args.lookback, args.horizon, regression=args.regression)
+    if args.feature_source:
+        # ---------- 跨标的模式：特征=feature-source 序列，标签=source 序列 ----------
+        feat_ticker = resolve_yf_ticker(args.feature_source)
+        label_ticker = resolve_yf_ticker(args.source)
+        f_dates, f_prices = fetch_yf_prices(feat_ticker, YF_START, None)
+        l_dates, l_prices = fetch_yf_prices(label_ticker, YF_START, None)
+        f_map = dict(zip(f_dates, f_prices))
+        l_map = dict(zip(l_dates, l_prices))
+        common = sorted(set(f_dates) & set(l_dates))
+        feature_prices = np.array([f_map[d] for d in common], dtype=float)
+        label_prices = np.array([l_map[d] for d in common], dtype=float)
+        print(
+            f"特征源 {args.feature_source}({feat_ticker}): {len(f_prices)} 根; "
+            f"标签源 {args.source}({label_ticker}): {len(l_prices)} 根; "
+            f"按日期对齐后 {len(common)} 根"
+        )
+        if args.train_end:
+            te = datetime.datetime.strptime(args.train_end, "%Y-%m-%d").date()
+            mask = np.array([d <= te for d in common], dtype=bool)
+            feature_prices = feature_prices[mask]
+            label_prices = label_prices[mask]
+            common = [d for d in common if d <= te]
+            print(f"训练数据已截断到 {args.train_end}（仅用此日及之前，之后留作样本外）")
+        print(
+            f"对齐训练区间 {common[0]} ~ {common[-1]}, "
+            f"特征(VIX类)={len(feature_prices)} 根, 标签(SPY类)={len(label_prices)} 根"
+        )
+        if args.model_type == "cnn":
+            X, y = make_cnn_dataset(
+                feature_prices, args.lookback, args.horizon,
+                regression=args.regression, label_prices=label_prices,
+            )
+        else:
+            X, y = make_dataset(
+                feature_prices, args.lookback, args.horizon,
+                regression=args.regression, label_prices=label_prices,
+            )
     else:
-        X, y = make_dataset(prices, args.lookback, args.horizon, regression=args.regression)
+        # ---------- 单序列模式（向后兼容 HSI/CSI300） ----------
+        bars = get_bars(args.source)
+        if args.train_end:
+            te = datetime.datetime.strptime(args.train_end, "%Y-%m-%d").date()
+            bars = [b for b in bars if b.datetime.date() <= te]
+            print(f"训练数据已截断到 {args.train_end}（仅用此日及之前，之后留作样本外）")
+
+        prices = np.array([float(b.close_price) for b in bars], dtype=float)
+        print(
+            f"训练源 {args.source}: {len(prices)} 根日线, "
+            f"区间 {bars[0].datetime.date()} ~ {bars[-1].datetime.date()}"
+        )
+
+        if args.model_type == "cnn":
+            X, y = make_cnn_dataset(prices, args.lookback, args.horizon, regression=args.regression)
+        else:
+            X, y = make_dataset(prices, args.lookback, args.horizon, regression=args.regression)
     if len(X) < 30:
         raise RuntimeError("样本不足，无法训练（至少需要 30 条）")
     if args.regression:
@@ -246,10 +317,14 @@ def main() -> None:
     if args.out:
         out = args.out
     elif args.train_end:
-        out = os.path.join(HERE, f"{prefix}_{args.source}_{args.train_end}.joblib")
+        if args.feature_source:
+            out = os.path.join(HERE, f"{prefix}_{args.source}_feat{args.feature_source}_{args.train_end}.joblib")
+        else:
+            out = os.path.join(HERE, f"{prefix}_{args.source}_{args.train_end}.joblib")
     else:
         out = os.path.join(HERE, f"{prefix}.joblib")
 
+    meta["feature_source"] = args.feature_source   # 记录特征源（跨标的模式用），供推理侧参考
     joblib.dump(meta, out)
     print(f"固定模型已保存: {out}")
     if args.train_end:

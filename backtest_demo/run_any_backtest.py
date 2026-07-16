@@ -24,7 +24,7 @@
 import argparse
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pandas as pd
 import numpy as np
@@ -43,6 +43,7 @@ PRESETS = {
     "CSI300": {"symbol": "000300", "exchange": Exchange.SSE, "source": "csi300", "name": "沪深300"},
     "HSI": {"symbol": "HSI", "exchange": Exchange.SEHK, "source": "hsi_yf", "name": "恒生指数"},
     "SPY": {"symbol": "SPY", "exchange": Exchange.SMART, "source": "spy", "name": "标普500"},
+    "VIX": {"symbol": "VIX", "exchange": Exchange.SMART, "source": "vix", "name": "VIX"},
 }
 
 
@@ -50,11 +51,38 @@ def _exchange_from_str(s: str) -> Exchange:
     return {"SSE": Exchange.SSE, "SZSE": Exchange.SZSE, "SEHK": Exchange.SEHK}[s.upper()]
 
 
-def ensure_data(cfg: dict, no_fetch: bool = False) -> None:
+def _ensure_feature(symbol: str, exchange: str, no_fetch: bool) -> None:
+    """确保外部特征标的（如 VIX）已入库；缺失且允许抓取时自动 fetch。"""
+    fex = Exchange(exchange) if exchange else Exchange.SMART
+    db = get_database()
+    recent = db.load_bar_data(symbol, fex, Interval.DAILY,
+                              datetime.now() - timedelta(days=15), None)
+    if recent:
+        print(f"[特征] {symbol}.{fex.value} 库内已有数据，跳过抓取")
+        return
+    if no_fetch:
+        raise SystemExit(
+            f"特征标的 {symbol}.{fex.value} 库内无数据，且 --no-fetch 禁止抓取；"
+            f"请先运行对应 fetch 脚本（如 fetch_vix.py）"
+        )
+    if symbol == "VIX":
+        import fetch_vix
+        fetch_vix.main()
+    else:
+        raise SystemExit(f"未知特征标的 {symbol}，无对应 fetch 脚本（目前仅支持 VIX）")
+
+
+def ensure_data(cfg: dict, no_fetch: bool = False,
+                feature_symbol: str = "", feature_exchange: str = "") -> None:
     """抓取并写入数据库，确保回测引擎能 load_data。
 
     no_fetch=True 时跳过抓取，直接使用数据库中已有数据（多标的复测避免重复联网）。
+    feature_symbol 非空时额外确保「外部特征标的」（如 VIX）已入库——推理侧 on_bar
+    要用它的历史序列构建特征；缺失且非 --no-fetch 时自动抓取（目前仅支持 VIX）。
     """
+    # 先确保外部特征标的入库
+    if feature_symbol:
+        _ensure_feature(feature_symbol, feature_exchange, no_fetch)
     if no_fetch:
         print(f"[no-fetch] 跳过数据抓取，使用数据库中已有 "
               f"{cfg['symbol']}.{cfg['exchange'].value} 数据")
@@ -168,7 +196,9 @@ def compute_window_stats(df: pd.DataFrame, test_start_dt: datetime):
 
 def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None,
                  use_kelly: bool = True, out_name: str = None,
-                 hold_period: int = 5, prior_adjust: bool = False) -> None:
+                 hold_period: int = 5, prior_adjust: bool = False,
+                 horizon: int = 5, feature_symbol: str = "",
+                 feature_exchange: str = "") -> None:
     vt_symbol = f"{cfg['symbol']}.{cfg['exchange'].value}"
     name = cfg["name"]
     base = out_name or f"frozen_{cfg['symbol']}"
@@ -202,6 +232,9 @@ def run_backtest(cfg: dict, model_path: str = MODEL_PATH, test_start: str = None
             "trade_start": test_start or "",
             "hold_period": hold_period,
             "prior_adjust": prior_adjust,
+            "horizon": horizon,
+            "feature_symbol": feature_symbol,
+            "feature_exchange": feature_exchange,
         },
     )
     engine.load_data()
@@ -384,6 +417,15 @@ def main() -> None:
         "--no-fetch", action="store_true",
         help="跳过数据抓取，直接使用数据库中已有数据（多标的复测/离线跑避免重复联网）。",
     )
+    ap.add_argument(
+        "--feature-target", default=None,
+        help="外部特征标的（如 VIX）。指定后推理用该标的序列构建特征，而非交易标的自身；"
+             "需与训练时 --feature-source 一致（如用 VIX 训练 SPY 则此处填 VIX）。",
+    )
+    ap.add_argument(
+        "--horizon", type=int, default=5,
+        help="训练标签跨度（未来 N 日）；仅用于记录/展示，推理时模型已冻结。默认 5。",
+    )
     args = ap.parse_args()
 
     model_path = MODEL_PATH
@@ -392,13 +434,27 @@ def main() -> None:
     if not os.path.exists(model_path):
         raise SystemExit(f"未找到固定模型 {model_path}，请先运行 train_model.py")
 
+    # 解析外部特征标的（如 VIX）
+    feature_symbol = ""
+    feature_exchange = ""
+    if args.feature_target:
+        ft = args.feature_target.upper()
+        if ft in PRESETS:
+            feature_symbol = PRESETS[ft]["symbol"]
+            feature_exchange = PRESETS[ft]["exchange"].value
+        else:
+            feature_symbol = args.feature_target
+            feature_exchange = (args.exchange or "SMART")
+
     cfg = build_cfg(args)
-    ensure_data(cfg, no_fetch=args.no_fetch)
+    ensure_data(cfg, no_fetch=args.no_fetch,
+                feature_symbol=feature_symbol, feature_exchange=feature_exchange)
     run_backtest(
         cfg, model_path=model_path, test_start=args.test_start,
         use_kelly=not args.no_kelly,
         out_name=args.out_name, hold_period=args.hold_period,
-        prior_adjust=args.prior_adjust,
+        prior_adjust=args.prior_adjust, horizon=args.horizon,
+        feature_symbol=feature_symbol, feature_exchange=feature_exchange,
     )
 
 

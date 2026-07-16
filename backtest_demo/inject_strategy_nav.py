@@ -36,6 +36,14 @@ STRATEGY_NAV = [
      "样本外 +2.63% ｜ 超额 −64.61% ｜ Sharpe 0.167 ｜ 回撤 −5.21% ｜ 64 笔"),
     ("SPY · RF Rank 二值版（h10·回归）", "spy_rf_rank_binary_chart.html",
      "样本外 +35.53% ｜ 超额 −31.70% ｜ Sharpe 0.550 ｜ 回撤 −16.27% ｜ 61 笔"),
+    # —— 标普500 SPY（VIX 特征训练·h10，OOS 2022-01-03~，买入持有约 +58%）——
+    # 用 VIX 形态预测 SPY 涨跌：分类二值首次跑赢 SPY 买入持有基准；回归Rank 在 VIX 特征下 P 趋中、空仓。
+    ("SPY·VIX · RF 二值（h10·分类）", "spy_vix_rf_binary_chart.html",
+     "样本外 +64.51% ｜ 超额 +6.50% ｜ Sharpe 0.720 ｜ 回撤 −22.33% ｜ 7 笔（跑赢基准）"),
+    ("SPY·VIX · RF Rank 凯利版（h10·回归）", "spy_vix_rf_rank_kelly_chart.html",
+     "样本外 0.00% ｜ 0 笔交易（回归Rank P 趋中，空仓）"),
+    ("SPY·VIX · RF Rank 二值版（h10·回归）", "spy_vix_rf_rank_binary_chart.html",
+     "样本外 0.00% ｜ 0 笔交易（回归Rank P 趋中，空仓）"),
 ]
 
 

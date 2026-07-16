@@ -138,28 +138,32 @@ def label_at(prices: np.ndarray, i: int, horizon: int) -> int:
     return 1 if fut > 0 else 0
 
 
-def make_dataset(prices: np.ndarray, lookback: int, horizon: int, regression: bool = False):
-    """构造训练集 (X, y)。遍历历史点，特征在 i 及之前，标签在 i 之后。
+def make_dataset(prices: np.ndarray, lookback: int, horizon: int, regression: bool = False,
+                 label_prices: np.ndarray = None):
+    """构造训练集 (X, y)。特征来自 prices，标签来自 label_prices（默认 = prices）。
 
-    regression=False（默认，分类）：标签 = 未来 horizon 日涨跌 (1=涨 / 0=跌)。
-    regression=True （回归）：标签 = NormalizeReturn(训练集全部涨幅(含亏损), 未来 horizon 日涨幅) / 100，
-        即「该涨幅在训练集涨幅分布中的 Rank 百分位」缩到 [0,1]，作为胜率 P
-        （RF 回归器 / CNN 共用同一套标签口径，回测按凯利 f=2P-1 算仓位）。
+    - prices（特征序列，如 VIX）与 label_prices（标签序列，如 SPY）必须等长且按日期对齐。
+    - regression=False（分类）：标签 = label_prices 未来 horizon 日涨跌 (1=涨 / 0=跌)。
+    - regression=True （回归）：标签 = NormalizeReturn(训练集 label 全部涨幅(含亏损), 未来 horizon 日涨幅) / 100，
+        即「该涨幅在训练集标签分布中的 Rank 百分位」缩到 [0,1]，作为胜率 P。
+    这样即可实现「用 VIX 形态预测 SPY 涨跌」：prices=VIX 序列，label_prices=SPY 序列。
     """
+    if label_prices is None:
+        label_prices = prices
     X, y = [], []
     n = len(prices)
     if regression:
         idxs = list(range(lookback, n - horizon))
         futures = np.array(
-            [prices[i + horizon] / prices[i] - 1.0 for i in idxs], dtype=float
+            [label_prices[i + horizon] / label_prices[i] - 1.0 for i in idxs], dtype=float
         )
     for i in range(lookback, n - horizon):
         f = feature_at(prices, i)
         if regression:
-            fut = prices[i + horizon] / prices[i] - 1.0
+            fut = label_prices[i + horizon] / label_prices[i] - 1.0
             lab = NormalizeReturn(futures, fut) / 100.0
         else:
-            lab = label_at(prices, i, horizon)
+            lab = label_at(label_prices, i, horizon)
             if lab < 0:
                 continue
         X.append(f)
@@ -190,26 +194,27 @@ def cnn_image(prices: np.ndarray, i: int, lookback: int) -> np.ndarray:
     return img.reshape(L, L, 1)
 
 
-def make_cnn_dataset(prices: np.ndarray, lookback: int, horizon: int, regression: bool = False):
-    """构造 CNN 训练集 (X, y)：每个样本是位置 i 的 L×L 价格图。
+def make_cnn_dataset(prices: np.ndarray, lookback: int, horizon: int, regression: bool = False,
+                     label_prices: np.ndarray = None):
+    """构造 CNN 训练集 (X, y)：每个样本是位置 i 的 L×L 价格图（特征来自 prices）。
 
-    regression=False（默认，分类）：标签 = 未来 horizon 日涨跌 (1=涨 / 0=跌)。
-    regression=True （回归）：标签 = NormalizeReturn(训练集涨幅分布, 未来 horizon 日涨幅) / 100，
-        即「该涨幅在训练集涨幅分布中的百分位(0~100%)」再缩到 [0,1]，作为胜率 P
-        （训练集涨幅分布内 Rank：r<0→0，r>=0→百分位）。误差用 mse 训练。
+    label_prices（标签序列，默认 = prices）提供未来涨跌标签，支持「特征-标签」跨标的分离：
+    如 prices=VIX 序列、label_prices=SPY 序列，即用 VIX 价格图预测 SPY 涨跌。
     """
+    if label_prices is None:
+        label_prices = prices
     X, y = [], []
     L = lookback
     n = len(prices)
     # 先收集训练集里所有样本的「未来 horizon 日涨幅」，用于回归模式的 Rank 百分位归一化
     futures = np.array(
-        [prices[i + horizon] / prices[i] - 1.0 for i in range(L - 1, n - horizon)],
+        [label_prices[i + horizon] / label_prices[i] - 1.0 for i in range(L - 1, n - horizon)],
         dtype=float,
     )
     for i in range(L - 1, n - horizon):
-        fut = prices[i + horizon] / prices[i] - 1.0
+        fut = label_prices[i + horizon] / label_prices[i] - 1.0
         if regression:
-            # 用训练集全部涨幅的 Rank 百分位归一化（r<0→0），再 /100 缩到 [0,1] 喂给 sigmoid
+            # 用训练集标签全部涨幅的 Rank 百分位归一化（r<0→0），再 /100 缩到 [0,1] 喂给 sigmoid
             lab = NormalizeReturn(futures, fut) / 100.0
         else:
             lab = 1 if fut > 0 else 0
@@ -254,6 +259,9 @@ class AIStrategy(CtaTemplate):
 
     prior_adjust = False  # 先验校正：开启后把 RF 分类输出的涨概率去训练集先验偏置(P0)，并按 (1-P0) 二值化
 
+    feature_symbol = ""    # 外部特征标的（如 VIX）。非空时特征序列取自该标的，而非当前交易标的本身（跨标的训练用）
+    feature_exchange = ""  # 外部特征标的的交易所（如 SMART）；留空默认 SMART
+
     # 变量
     p_up = 0.0
     target_pct = 0.0       # 当前目标仓位比例（占总权益）
@@ -271,7 +279,7 @@ class AIStrategy(CtaTemplate):
         "lookback", "horizon", "min_train", "retrain_interval",
         "threshold", "allow_short", "kelly_scale", "max_position", "use_kelly",
         "stop_loss_pct", "trailing_pct", "fixed_model", "model_path", "trade_start",
-        "regression", "hold_period", "prior_adjust",
+        "regression", "hold_period", "prior_adjust", "feature_symbol", "feature_exchange",
     ]
     variables = [
         "p_up", "target_pct", "model_trained", "entry_price",
@@ -296,6 +304,10 @@ class AIStrategy(CtaTemplate):
         self.target_pct = 0.0
         self.bars_held = 0       # 当前持仓已持有的根数（配合 hold_period）
         self.p0 = None            # 训练集涨概率先验(P0)，由模型 blob 的 pos_rate 注入；None=未知不校正
+        self.feature_symbol = getattr(self, "feature_symbol", "")
+        self.feature_exchange = getattr(self, "feature_exchange", "")
+        self.feature_prices = []      # 外部特征序列（如 VIX）；feature_symbol 为空时指向 self.prices
+        self.feat_date_to_close = {}  # 特征标的 datetime.date -> close 映射（on_init 加载）
 
     def _prior_correct(self, p) -> float:
         """先验校正（去训练集先验偏置）：P = P1*(1-P0) / (P1*(1-P0) + (1-P1)*P0)。
@@ -391,6 +403,41 @@ class AIStrategy(CtaTemplate):
         # 固定模型模式：在回测开始前一次性加载冻结模型，运行期不再重训
         if self.fixed_model:
             self._load_model()
+        # 加载外部特征标的（如 VIX）历史，供 on_bar 用其特征序列构建特征
+        if getattr(self, "feature_symbol", ""):
+            self._load_feature_bars()
+
+    def _load_feature_bars(self):
+        """从 SQLite 加载外部特征标的（如 VIX）全历史到 date->close 映射，供 on_bar 构建特征。"""
+        from datetime import datetime as _dt
+        from vnpy.trader.constant import Exchange, Interval
+        from vnpy.trader.database import get_database
+
+        try:
+            fex = Exchange(self.feature_exchange) if self.feature_exchange else Exchange.SMART
+        except Exception:
+            fex = Exchange.SMART
+        try:
+            bars = get_database().load_bar_data(
+                self.feature_symbol, fex, Interval.DAILY, _dt(2000, 1, 1), None
+            )
+        except Exception as e:
+            self.write_log(f"加载特征标的 {self.feature_symbol} 失败: {e}")
+            return
+        self.feat_date_to_close = {}
+        for b in bars:
+            bd = b.datetime
+            if getattr(bd, "tzinfo", None) is not None:
+                bd = bd.replace(tzinfo=None)
+            self.feat_date_to_close[bd.date()] = float(b.close_price)
+        if self.feat_date_to_close:
+            self.write_log(
+                f"已加载特征标的 {self.feature_symbol}.{fex.value} 历史 "
+                f"{len(self.feat_date_to_close)} 根 "
+                f"({min(self.feat_date_to_close)}~{max(self.feat_date_to_close)})"
+            )
+        else:
+            self.write_log(f"特征标的 {self.feature_symbol}.{fex.value} 无数据，请先抓取（如 fetch_vix.py）")
 
     def _load_model(self):
         """从 model_path 加载冻结的随机森林模型（joblib）。"""
@@ -445,6 +492,21 @@ class AIStrategy(CtaTemplate):
         self.cancel_all()
         self.am.update_bar(bar)
         self.prices.append(float(bar.close_price))
+        # 外部特征序列（如 VIX）：按当前 bar 日期从预加载映射取特征标的收盘价，
+        # 维护成与 self.prices 等长且按交易日对齐的序列；feature_symbol 为空则用自身价格。
+        if self.feature_symbol:
+            bd = bar.datetime
+            if getattr(bd, "tzinfo", None) is not None:
+                bd = bd.replace(tzinfo=None)
+            d = bd.date()
+            v = self.feat_date_to_close.get(d)
+            if v is None and self.feature_prices:
+                v = self.feature_prices[-1]   # 交易日缺失（如假期）用前值
+            if v is None:
+                v = self.prices[-1]           # 极端兜底
+            self.feature_prices.append(v)
+        else:
+            self.feature_prices = self.prices  # 别名：特征即自身价格（向后兼容）
         prices = np.array(self.prices, dtype=float)
         n = len(prices)
         if n < self.min_train:
@@ -522,11 +584,12 @@ class AIStrategy(CtaTemplate):
         if self.model is None:
             return
 
+        feat_prices = np.array(self.feature_prices, dtype=float)
         if self.model_type == "cnn":
-            # 纯 AI CNN：把最近 lookback 根收盘价铺成 L×L 价格图，直接推理
-            if n < self.lookback:
+            # 纯 AI CNN：把最近 lookback 根（特征标的）收盘价铺成 L×L 价格图，直接推理
+            if len(feat_prices) < self.lookback:
                 return
-            X = cnn_image(prices, n - 1, self.lookback)        # (L, L, 1)
+            X = cnn_image(feat_prices, len(feat_prices) - 1, self.lookback)   # (L, L, 1)
             X = np.expand_dims(X, axis=0)                       # (1, L, L, 1) 加 batch 维
             pred = self.model.predict(X, verbose=0)
             if self.regression:
@@ -538,7 +601,7 @@ class AIStrategy(CtaTemplate):
                 self.p_up = float(proba[1]) if len(proba) > 1 else 0.5
                 self.p_up = self._prior_correct(self.p_up)  # 分类概率路径先验校正
         else:
-            feat = feature_at(prices, n - 1)
+            feat = feature_at(feat_prices, len(feat_prices) - 1)
             # 固定模型模式下校验特征维数一致，避免训练/推理错位
             if self.n_features_ and len(feat) != self.n_features_:
                 self.write_log(
