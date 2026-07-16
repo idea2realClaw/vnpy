@@ -419,7 +419,7 @@ class AIStrategy(CtaTemplate):
             fex = Exchange.SMART
         try:
             bars = get_database().load_bar_data(
-                self.feature_symbol, fex, Interval.DAILY, _dt(2000, 1, 1), None
+                self.feature_symbol, fex, Interval.DAILY, _dt(2000, 1, 1), _dt(2100, 1, 1)
             )
         except Exception as e:
             self.write_log(f"加载特征标的 {self.feature_symbol} 失败: {e}")
