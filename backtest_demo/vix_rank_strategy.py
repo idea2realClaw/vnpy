@@ -2,18 +2,30 @@
 # -*- coding: utf-8 -*-
 """VIX Rank 满仓/空仓 SPY 策略（纯 VIX 驱动）。
 
-完全基于 VIX 的「长期 / 短期 Rank」（复刻 daofund 阴阳指数）决定 SPY 满仓或空仓：
+两种决策框架：
+
+【A. 阴阳指数框架（复刻 daofund）】
   - p1 = 长期 VIX Rank（今天 VIX vs 近 long_window 日历史）
   - p2 = 短期 VIX Rank（今天 VIX vs 近 short_window 日历史）
   - p3 = 长期取反（今天 VIX vs 近 p3_window 日历史，1 - rank）
   - signal = w_p2*p2 + w_p1*p1 + w_p3*p3          （阴阳 yyi）
            或 rank_mode='p1' / 'p2' 直接使用单一 rank
-  - signal < threshold  -> 满仓 SPY（用初始资金按当前价换算手数，全部买入）
-  - signal >= threshold -> 空仓（全部卖出，持有现金）
+  - signal < threshold  -> 满仓 SPY；signal >= threshold -> 空仓
+  ⚠️ 注意：原 daofund 逻辑是「VIX 高就空仓」，但美股历史数据显示 VIX 高位反而是
+     均值回归的买入信号，故该框架在牛市中易踏空（见下方 panic_reversal）。
+
+【B. 恐慌反转框架（改进 1+2：z-score 尖峰 + 恐慌反转，sign 翻转）】
+  rank_mode='panic_reversal'：
+  1) 尖峰检测：用 VIX 相对自身 z_window 历史的 z-score（或绝对水平）判断是否处于恐慌尖峰；
+  2) 反转确认：VIX 已连续 fall_days 日下降，确认尖峰已过、进入均值回归；
+  3) 决策（sign 翻转）：
+       - VIX 平稳/低位（未触发尖峰）        -> 满仓（吃牛市）
+       - VIX 触发尖峰且仍在恶化（未回落）  -> 空仓（躲最惨的下跌初期，避免接刀）
+       - VIX 触发尖峰且已连续回落          -> 满仓（恐慌反转，抄底吃反弹）
+  即「高位尖峰=买入信号」，但仅在确认回落后才买，避免接刀。
 
 无未来函数：VIX 历史在 on_init 一次性从 SQLite 全量载入；on_bar 仅用「截至当日」的
-VIX 计算 rank。vnpy 回测引擎在下根 bar 开盘撮合，故决策用当日收盘 VIX、成交在下根开盘，
-与 daofund 的「当日收盘决策、次日生效」一致。
+VIX 计算。vnpy 回测引擎在下根 bar 开盘撮合，故决策用当日 VIX、成交在下根开盘。
 
 依赖：numpy；信息来自 vnpy.trader.database（与 ai_strategy 同一套特征加载方式）。
 """
@@ -44,7 +56,7 @@ class VixRankStrategy(CtaTemplate):
 
     author = "demo-vix-rank"
 
-    # ---------- 参数 ----------
+    # ---------- 参数（阴阳指数框架）----------
     feature_symbol = "VIX"          # 信号源标的（默认 VIX）
     feature_exchange = "SMART"      # 信号源交易所
     long_window = 2520              # 长期 rank 回看窗口（~10 年交易日）
@@ -53,8 +65,17 @@ class VixRankStrategy(CtaTemplate):
     w_p1 = 0.15                     # 阴阳指数中 p1 权重
     w_p2 = 0.70                     # 阴阳指数中 p2 权重
     w_p3 = 0.15                     # 阴阳指数中 p3 权重
-    rank_mode = "yyi"              # 'yyi' = 组合；'p1' = 仅长期；'p2' = 仅短期
-    threshold = 0.70               # 信号阈值：signal < threshold 满仓，否则空仓
+    rank_mode = "yyi"              # 'yyi'/'p1'/'p2' = 阴阳指数框架；'panic_reversal' = 改进 1+2
+    threshold = 0.70               # 阴阳框架阈值：signal < threshold 满仓，否则空仓
+
+    # ---------- 参数（panic_reversal 框架专用：改进 1+2）----------
+    z_window = 60                  # 计算 z-score 的滚动窗口（交易日）
+    spike_metric = "z"             # 尖峰判定方式：'z'=VIX 相对自身的 z-score；'level'=VIX 绝对水平
+    spike_thr = 2.5                # 'z' 模式下为标准差倍数；'level' 模式下为 VIX 绝对水平阈值
+    fall_days = 3                  # 连续下降天数，确认「恐慌反转」已发生
+    min_hist = 252                 # 至少需要多少历史交易日才启用 panic 逻辑（否则默认满仓）
+
+    # ---------- 通用参数 ----------
     use_full_capital = True        # True=满仓按初始资金换算手数（~100% 权益）；False=用 fixed_size
     fixed_size = 100               # use_full_capital=False 时的固定手数
     trade_start = ""               # 样本外起点(YYYY-MM-DD)，之前只预热不交易；留空=不限制
@@ -64,14 +85,16 @@ class VixRankStrategy(CtaTemplate):
     p2 = 0.0
     p3 = 0.0
     signal = 0.0
+    spike_val = 0.0                # panic 模式下记录尖峰度（z 或 level），便于日志/统计
     in_market = 0                  # 1=满仓, 0=空仓
 
     parameters = [
         "feature_symbol", "feature_exchange", "long_window", "short_window", "p3_window",
         "w_p1", "w_p2", "w_p3", "rank_mode", "threshold",
+        "z_window", "spike_metric", "spike_thr", "fall_days", "min_hist",
         "use_full_capital", "fixed_size", "trade_start",
     ]
-    variables = ["p1", "p2", "p3", "signal", "in_market"]
+    variables = ["p1", "p2", "p3", "signal", "spike_val", "in_market"]
 
     # 市价单模拟：回测引擎对限价单在「下根 bar 开盘」撮合（成交价=min(买价,下开)/max(卖价,下开)）。
     # 把下单价格设得足够极端，保证必定穿越、从而以「下根开盘价」成交（贴近真实市价单），
@@ -148,8 +171,8 @@ class VixRankStrategy(CtaTemplate):
             lo -= 1
         return lo
 
-    def _compute_signal(self, idx: int) -> float:
-        """用截至 idx（含）的 VIX 历史计算 p1/p2/p3/signal。"""
+    def _compute_signal(self, idx: int):
+        """用截至 idx（含）的 VIX 历史计算 p1/p2/p3/signal（阴阳指数框架）。"""
         if idx < 1:
             return 0.0, 0.0, 0.0, 0.0
         cur = self.feat_closes[idx]
@@ -173,8 +196,71 @@ class VixRankStrategy(CtaTemplate):
             sig = self.w_p2 * p2 + self.w_p1 * p1 + self.w_p3 * p3
         return p1, p2, p3, sig
 
+    def _compute_target(self, idx: int) -> int:
+        """返回目标持仓：1=满仓, 0=空仓。
+
+        阴阳指数框架：signal < threshold -> 满仓。
+        panic_reversal 框架（改进 1+2，sign 翻转）：
+          - VIX 平稳/低位（未触发尖峰）        -> 满仓（吃牛市）
+          - VIX 触发尖峰且仍在恶化（未回落）  -> 空仓（躲最惨的下跌初期）
+          - VIX 触发尖峰且已连续 fall_days 日回落 -> 满仓（恐慌反转，吃均值回归反弹）
+        """
+        if idx < 1:
+            return 1
+        cur = self.feat_closes[idx]
+        hist = self.feat_closes[: idx + 1]
+
+        # ---------- 阴阳指数框架 ----------
+        if self.rank_mode != "panic_reversal":
+            p1, p2, p3, sig = self._compute_signal(idx)
+            self.p1, self.p2, self.p3 = p1, p2, p3
+            self.signal = sig
+            self.spike_val = sig
+            return 1 if sig < self.threshold else 0
+
+        # ---------- panic_reversal 框架（改进 1+2）----------
+        if len(hist) < self.min_hist:
+            self.signal = cur
+            self.spike_val = cur
+            return 1  # 历史不足，默认满仓
+
+        # 1) 尖峰度
+        if self.spike_metric == "z":
+            w = min(self.z_window, len(hist))
+            win = hist[-w:]
+            mu = float(np.mean(win))
+            sd = float(np.std(win))
+            if sd <= 1e-9:
+                self.signal = cur
+                self.spike_val = 0.0
+                return 1
+            z = (cur - mu) / sd
+            self.spike_val = z
+            is_spike = z >= self.spike_thr
+        else:  # level
+            self.spike_val = cur
+            is_spike = cur >= self.spike_thr
+        self.signal = self.spike_val
+
+        # 2) 是否已回落（最近 fall_days 日连续下降）
+        if len(hist) < self.fall_days + 1:
+            is_falling = False
+        else:
+            recent = hist[-(self.fall_days + 1):]
+            is_falling = all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
+
+        # 3) 决策（sign 翻转：高位尖峰=买入信号，但仅在确认回落后才买）
+        if not is_spike:
+            return 1
+        if is_falling:
+            return 1
+        return 0
+
     def on_start(self):
-        self.write_log(f"VIX Rank 策略启动（rank_mode={self.rank_mode}, threshold={self.threshold}）")
+        self.write_log(
+            f"VIX Rank 策略启动（rank_mode={self.rank_mode}, threshold={self.threshold}, "
+            f"spike_metric={self.spike_metric}, spike_thr={self.spike_thr}, fall_days={self.fall_days}）"
+        )
 
     def on_stop(self):
         self.write_log("VIX Rank 策略停止")
@@ -192,15 +278,14 @@ class VixRankStrategy(CtaTemplate):
         idx = self._idx_for(d)
         if idx < 0:
             return
-        self.p1, self.p2, self.p3, self.signal = self._compute_signal(idx)
+        target = self._compute_target(idx)
 
         # 样本外起点之前：仅预热，不交易
         if self.trade_start_dt is not None and bd < self.trade_start_dt:
             return
 
         # 满仓 / 空仓 决策
-        enter = self.signal < self.threshold
-        if enter and not self.in_market:
+        if target == 1 and not self.in_market:
             size = float(self.cta_engine.size)
             if size <= 0 or bar.close_price <= 0:
                 return
@@ -211,12 +296,12 @@ class VixRankStrategy(CtaTemplate):
             if lots > 0:
                 self.buy(bar.close_price * self.MKT_BUFFER, lots)
                 self.in_market = 1
-                self.write_log(f"满仓买入 {lots} 手 @ ~{bar.close_price:.2f}（signal={self.signal:.3f}）")
-        elif not enter and self.in_market:
+                self.write_log(f"满仓买入 {lots} 手 @ ~{bar.close_price:.2f}（spike_val={self.spike_val:.2f}）")
+        elif target == 0 and self.in_market:
             if self.pos > 0:
                 self.sell(bar.close_price / self.MKT_BUFFER, abs(self.pos))
                 self.in_market = 0
-                self.write_log(f"空仓卖出 @ ~{bar.close_price:.2f}（signal={self.signal:.3f}）")
+                self.write_log(f"空仓卖出 @ ~{bar.close_price:.2f}（spike_val={self.spike_val:.2f}）")
 
     def on_order(self, order):
         pass
