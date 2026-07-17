@@ -20,7 +20,7 @@ from plotly.offline import plot as plot_offline
 from backtest_demo.run_vts_backtest import load_close
 
 OUT_DIR = "/Users/zhuxiaodong/Documents/GitRepo/vnpy/backtest_demo"
-THRS = [1.6, 1.7, 1.8, 1.9, 2.0]
+THRS = [round(1.2 + 0.1 * i, 1) for i in range(9)]  # 1.2 .. 2.0, step 0.1
 DIR = "high_cash"
 WINS = {"全样本 2011-2025": ("2011-01-01", "2025-12-31"),
         "样本外 2016-2026": ("2016-01-01", "2026-07-15")}
