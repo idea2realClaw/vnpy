@@ -8,9 +8,10 @@
   XLU   公用事业 ETF           -> Defensive Rotation 的“中高波动=防御”档
   IYR   房地产 ETF             -> Strategic Tail Risk 的“中波动”档
   VIXM  VIX 中期期货 ETF        -> Strategic Tail Risk 的“极端波动=做多波动率”档
-  VXV   CBOE 3 月波动率指数(^VXV) -> 与 VIX 组成期限结构 VIX/VXV，做 Barometer 分量
+  VXV   CBOE 3 月波动率指数(^VIX3M) -> 与 VIX 组成期限结构 VIX/VXV，做 Barometer 分量
+  VVIX  CBOE VVIX 指数(^VVIX)   -> vol of vol，做 Barometer 分量（VTS 13 指标之 #6/#13）
 
-SPY.SMART 与 VIX.SMART 已存在，本脚本只补上述 5 个。
+SPY.SMART 与 VIX.SMART 已存在，本脚本只补上述 6 个。
 复用 fetch_vix.py 的 BarData 写入范式（走 vnpy on_conflict_replace upsert）。
 
 用法（仓库根目录执行）：
@@ -42,6 +43,9 @@ ASSETS = {
     # ^VXV 已在 yfinance 下架；^VIX3M（CBOE 3 月波动率指数）是其等价物，
     # VIX/VXV 期限结构即 VIX/VIX3M。仍存为 VXV.SMART 以保持 Barometer 代码一致。
     "^VIX3M": ("VXV", Exchange.SMART),
+    # ^VVIX = CBOE VVIX（VIX 的波动率，vol of vol）。VTS Barometer 13 指标中
+    # 含 VVIX 水平(#6) 与 VVIX/VIX 比(#13)；本地此前用代理，现补真实数据以提升吻合度。
+    "^VVIX": ("VVIX", Exchange.SMART),
 }
 
 
