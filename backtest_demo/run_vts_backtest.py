@@ -6,11 +6,11 @@ greatdaytrading / VTS 官方博客暴露的具体阈值）。VTS 核心是“Vol
 
   Defensive Rotation（VTS 官方博客原文阈值）:
       Barometer < 20%          -> Cash        （从 Cash 重新进场需 Barometer > 30%，滞后）
-      20% - 66%                -> QLD (2x Nasdaq)
+      20% - 66%                -> QQQ (Nasdaq 100，无杠杆)
       66% - 85%                -> XLU (公用事业)
       > 85%                    -> Cash
   Strategic Tail Risk（第三方评测阈值）:
-      0% - 55%                 -> SSO (2x S&P 500)
+      0% - 55%                 -> SPY (S&P 500，无杠杆)
       55% - 80%                -> IYR (房地产)
       > 80%                    -> VIXM (VIX 中期期货, 做多波动率)
 
@@ -79,7 +79,7 @@ def load_close(symbol: str) -> pd.Series:
 
 def load_all() -> dict:
     out = {}
-    for sym in ["SPY", "VIX", "VXV", "QLD", "XLU", "IYR", "VIXM"]:
+    for sym in ["SPY", "VIX", "VXV", "QQQ", "XLU", "IYR", "VIXM"]:
         out[sym] = load_close(sym)
     return out
 
@@ -133,7 +133,7 @@ def get_barometer(mode: str, comp: dict, b_real: np.ndarray) -> np.ndarray:
 
 # ----------------------------------------------------------------------------- 轮动
 def defensive_rotation_alloc(baro: np.ndarray) -> np.ndarray:
-    """0=QLD, 1=XLU, 2=Cash。带滞后（<20->Cash, 重进需>30）。"""
+    """0=QQQ, 1=XLU, 2=Cash。带滞后（<20->Cash, 重进需>30）。"""
     n = len(baro)
     alloc = np.full(n, 2, dtype=int)
     prev = 2
@@ -155,7 +155,7 @@ def defensive_rotation_alloc(baro: np.ndarray) -> np.ndarray:
 
 
 def tail_risk_alloc(baro: np.ndarray) -> np.ndarray:
-    """0=SSO(2xSPY), 1=IYR, 2=VIXM。"""
+    """0=SPY, 1=IYR, 2=VIXM。"""
     n = len(baro)
     alloc = np.full(n, 0, dtype=int)
     for t in range(n):
@@ -198,28 +198,27 @@ def stats(nav: np.ndarray, years: float) -> tuple:
 def run():
     data = load_all()
     common = data["SPY"].index
-    for s in ["VIX", "VXV", "QLD", "XLU", "IYR", "VIXM"]:
+    for s in ["VIX", "VXV", "QQQ", "XLU", "IYR", "VIXM"]:
         common = common.intersection(data[s].index)
     print(f"共同交易日: {len(common)}  ({common[0].date()} ~ {common[-1].date()})")
 
     spy = data["SPY"].loc[common].to_numpy()
     vix = data["VIX"].loc[common].to_numpy()
     vxv = data["VXV"].loc[common].to_numpy()
-    qld = data["QLD"].loc[common].to_numpy()
+    qqq = data["QQQ"].loc[common].to_numpy()
     xlu = data["XLU"].loc[common].to_numpy()
     iyr = data["IYR"].loc[common].to_numpy()
     vixm = data["VIXM"].loc[common].to_numpy()
     dates = common
 
     spy_ret = np.diff(spy) / spy[:-1]
-    qld_ret = np.diff(qld) / qld[:-1]
+    qqq_ret = np.diff(qqq) / qqq[:-1]
     xlu_ret = np.diff(xlu) / xlu[:-1]
     iyr_ret = np.diff(iyr) / iyr[:-1]
     vixm_ret = np.diff(vixm) / vixm[:-1]
-    sso_ret = 2.0 * spy_ret
 
-    dr_assets = {"QLD": qld_ret, "XLU": xlu_ret, "Cash": np.zeros_like(qld_ret)}
-    tr_assets = {"SSO": sso_ret, "IYR": iyr_ret, "VIXM": vixm_ret}
+    dr_assets = {"QQQ": qqq_ret, "XLU": xlu_ret, "Cash": np.zeros_like(qqq_ret)}
+    tr_assets = {"SPY": spy_ret, "IYR": iyr_ret, "VIXM": vixm_ret}
 
     comp = build_components(vix, vxv)
 
@@ -254,21 +253,19 @@ def run():
         b_full = get_barometer(PRIMARY, comp, b_real)
         dr_alloc = defensive_rotation_alloc(b_full)
         tr_alloc = tail_risk_alloc(b_full)
-        dr_nav_full = portfolio_nav(dr_alloc, dr_assets, ["QLD", "XLU", "Cash"])
-        tr_nav_full = portfolio_nav(tr_alloc, tr_assets, ["SSO", "IYR", "VIXM"])
+        dr_nav_full = portfolio_nav(dr_alloc, dr_assets, ["QQQ", "XLU", "Cash"])
+        tr_nav_full = portfolio_nav(tr_alloc, tr_assets, ["SPY", "IYR", "VIXM"])
         total_nav_full = np.sqrt(dr_nav_full * tr_nav_full)
 
         spy_nav_full = np.concatenate([[1.0], np.cumprod(1.0 + spy_ret)])
-        qld_nav_full = np.concatenate([[1.0], np.cumprod(1.0 + qld_ret)])
-        sso_nav_full = np.concatenate([[1.0], np.cumprod(1.0 + sso_ret)])
+        qqq_nav_full = np.concatenate([[1.0], np.cumprod(1.0 + qqq_ret)])
 
         def slice_nav(nav):
             seg = nav[i0:i1 + 1]
             return seg / seg[0]
 
         spy_seg = slice_nav(spy_nav_full)
-        qld_seg = slice_nav(qld_nav_full)
-        sso_seg = slice_nav(sso_nav_full)
+        qqq_seg = slice_nav(qqq_nav_full)
         dr_seg = slice_nav(dr_nav_full)
         tr_seg = slice_nav(tr_nav_full)
         total_seg = slice_nav(total_nav_full)
@@ -276,8 +273,7 @@ def run():
 
         rows = [
             ("SPY 买入持有 (基准)", *stats(spy_seg, years)),
-            ("QLD 买入持有 (2x Nasdaq)", *stats(qld_seg, years)),
-            ("SSO 买入持有 (2x S&P, 合成)", *stats(sso_seg, years)),
+            ("QQQ 买入持有 (Nasdaq)", *stats(qqq_seg, years)),
             ("VTS Defensive Rotation (反向工程)", *stats(dr_seg, years)),
             ("VTS Strategic Tail Risk (反向工程)", *stats(tr_seg, years)),
             ("VTS Total Portfolio (两策略等权)", *stats(total_seg, years)),
@@ -285,13 +281,13 @@ def run():
         df = pd.DataFrame(rows, columns=["策略", "total_return_%", "CAGR_%", "max_drawdown_%", "ret_dd_ratio"])
         df.to_csv(f"{OUT_DIR}/vts_summary_{wlabel}.csv", index=False)
 
-        results[wlabel] = dict(dates=seg_dates, spy=spy_seg, qld=qld_seg, sso=sso_seg,
+        results[wlabel] = dict(dates=seg_dates, spy=spy_seg, qqq=qqq_seg,
                                dr=dr_seg, tr=tr_seg, total=total_seg, df=df)
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=seg_dates, y=spy_seg * 100, name="SPY 买入持有",
                                  line=dict(color="#1f77b4", width=2)))
-        fig.add_trace(go.Scatter(x=seg_dates, y=qld_seg * 100, name="QLD 买入持有(2x Nasdaq)",
+        fig.add_trace(go.Scatter(x=seg_dates, y=qqq_seg * 100, name="QQQ 买入持有(Nasdaq)",
                                  line=dict(color="#ff7f0e", width=1.5, dash="dot")))
         fig.add_trace(go.Scatter(x=seg_dates, y=dr_seg * 100, name="VTS Defensive Rotation",
                                  line=dict(color="#2ca02c", width=2)))
@@ -322,8 +318,8 @@ def run():
     spy_nav_full = np.concatenate([[1.0], np.cumprod(1.0 + spy_ret)])
     for mode in ["real", "p1_only", "composite", "crisis_aware"]:
         b = get_barometer(mode, comp, b_real)
-        dr_nav = portfolio_nav(defensive_rotation_alloc(b), dr_assets, ["QLD", "XLU", "Cash"])
-        tr_nav = portfolio_nav(tail_risk_alloc(b), tr_assets, ["SSO", "IYR", "VIXM"])
+        dr_nav = portfolio_nav(defensive_rotation_alloc(b), dr_assets, ["QQQ", "XLU", "Cash"])
+        tr_nav = portfolio_nav(tail_risk_alloc(b), tr_assets, ["SPY", "IYR", "VIXM"])
         total = np.sqrt(dr_nav * tr_nav)
         seg = total[i0:i1 + 1] / total[i0]
         cmp_rows.append((mode, *stats(seg, years)))

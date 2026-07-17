@@ -1,7 +1,6 @@
 策略,total_return_%,CAGR_%,max_drawdown_%,ret_dd_ratio
 SPY 买入持有 (基准),67.96,12.17,-24.5,2.77
-QLD 买入持有 (2x Nasdaq),108.79,17.71,-63.08,1.72
-"SSO 买入持有 (2x S&P, 合成)",145.65,22.03,-45.57,3.2
-VTS Defensive Rotation (反向工程),81.84,14.16,-51.62,1.59
-VTS Strategic Tail Risk (反向工程),19.0,3.93,-46.69,0.41
-VTS Total Portfolio (两策略等权),47.1,8.92,-48.13,0.98
+QQQ 买入持有 (Nasdaq),85.67,14.69,-34.83,2.46
+VTS Defensive Rotation (反向工程),67.42,12.09,-28.54,2.36
+VTS Strategic Tail Risk (反向工程),-9.22,-2.12,-41.37,-0.22
+VTS Total Portfolio (两策略等权),23.28,4.75,-34.05,0.68

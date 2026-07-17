@@ -37,7 +37,7 @@ END_DATE = datetime.now().strftime("%Y-%m-%d")
 ASSETS = {
     "^VIX": ("VIX", Exchange.SMART),   # 已存在，重跑仅延伸
     "SPY": ("SPY", Exchange.SMART),    # 延伸到 2006（原仅 2016+），使 Barometer 全历史锚点可校验
-    "QLD": ("QLD", Exchange.SMART),
+    "QQQ": ("QQQ", Exchange.SMART),    # VTS Defensive Rotation 的无杠杆 Nasdaq 标的（原 QLD 的 2x 版已弃用）
     "XLU": ("XLU", Exchange.SMART),
     "IYR": ("IYR", Exchange.SMART),
     "VIXM": ("VIXM", Exchange.SMART),
