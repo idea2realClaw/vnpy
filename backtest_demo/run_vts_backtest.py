@@ -14,21 +14,25 @@ greatdaytrading / VTS 官方博客暴露的具体阈值）。VTS 核心是“Vol
       55% - 80%                -> IYR (房地产)
       > 80%                    -> VIXM (VIX 中期期货, 做多波动率)
 
-VTS 真实 Barometer 公式保密（十几项指标）。本脚本用「可计算波动率指标」反向工程几个
-透明近似，全部只用截至当日的历史、无未来函数：
+VTS 真实 Barometer 公式保密（十几项指标）。本脚本用两种口径驱动上述轮动：
+
+(A) 真实反向工程 Barometer（主，PRIMARY="real"）：直接复用 vts_barometer_formula.py 的
+    build_barometer()，即 16 个等分位指标（VIX 多窗口 + VIX3M + 期限结构 + 已实现/隐含波动
+    + VVIX 水平 + VVIX/VIX 比[反向] + VIX9D 水平）的等权滚动百分位，已校验与 VTS 公布锚点
+    高度吻合（均值43.3/峰86.3@2020新冠/2017低点13.7）。无未来函数。
+
+(B) 自研透明近似（对比行，仅 VIX/VXV）：
     p1   = VIX 相对近 10 年(2520 日)历史的百分位 rank      (长期水平，危机期逼近100)
     p2   = VIX 相对近 50 日历史的百分位 rank               (短期水平)
     z    = VIX 相对自身 60 日均线的 z-score               (尖峰/陡升)
     term = VIX / VXV  (VXV=^VIX3M, 3 月波动率) 期限结构    (backwardation>1=危机)
-
-模式：
-    p1_only      = p1*100                       （最忠实：危机顶到100、低波动逼近0，天然对齐阈值）
+    p1_only      = p1*100
     composite    = 0.40*p1+0.15*p2+0.20*z+0.25*term
     crisis_aware = 0.25*p1+0.15*p2+0.30*z+0.30*term
 
 调试发现：composite/crisis_aware 在 2020 新冠仅空仓~13%，危机期没避险（失败）；
-p1_only 在 2020 空仓69%/2022 空仓47%+防御46%，危机避险正确，且低波动期空仓恰好对应
-VTS 文档的 “Hysteresis in Low Volatility” 特性。故以 p1_only 为主、composite 作对比。
+p1_only 在 2020 空仓69%/2022 空仓47%+防御46%，危机避险正确。现以真实重建 Barometer 为主、
+p1_only/composite/crisis_aware 作对比，验证真实 Barometer 是否更好地复现 VTS 价值主张。
 
 执行约定：信号在 t 日收盘后算出，t+1 日按收盘调仓（close-to-close，与 vix_rank 向量化一致；属乐观口径）。
 
@@ -45,6 +49,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.offline import plot as plot_offline
 
+from backtest_demo.vts_barometer_formula import build_barometer
+
 DB_PATH = "/Users/zhuxiaodong/.vntrader/database.db"
 OUT_DIR = "/Users/zhuxiaodong/Documents/GitRepo/vnpy/backtest_demo"
 
@@ -53,7 +59,7 @@ WINDOWS = {
     "2017_2026": (datetime(2017, 1, 3), datetime(2026, 7, 15)),
 }
 
-PRIMARY = "p1_only"   # 主报告模式
+PRIMARY = "real"   # 主报告模式：真实反向工程 Barometer（含 VVIX+VIX9D，16 分量）
 
 
 # ----------------------------------------------------------------------------- 数据
@@ -116,6 +122,13 @@ def barometer(mode: str, c: dict) -> np.ndarray:
     if mode == "crisis_aware":
         return 0.25 * c["p1"] + 0.15 * c["p2"] + 0.30 * c["z"] + 0.30 * c["term"]
     raise ValueError(mode)
+
+
+def get_barometer(mode: str, comp: dict, b_real: np.ndarray) -> np.ndarray:
+    """统一入口：real 模式返回真实重建 Barometer，其余走自研近似。"""
+    if mode == "real":
+        return b_real
+    return barometer(mode, comp)
 
 
 # ----------------------------------------------------------------------------- 轮动
@@ -210,11 +223,17 @@ def run():
 
     comp = build_components(vix, vxv)
 
-    # 各模式总览（全样本 2016-2026，看危机避险是否生效）
+    # 真实反向工程 Barometer（含 VVIX+VIX9D，16 分量），对齐到 common 索引；
+    # warmup(NaN) 与 VIX9D 缺失日已在中置 0.5 中性，此处再 fillna(50) 保证轮动能跑（=完全持仓）。
+    baro_real_series, _, _ = build_barometer()
+    b_real = baro_real_series.reindex(common).to_numpy(dtype=float)
+    b_real = np.nan_to_num(b_real, nan=50.0)
+
+    # 各模式总览（全样本，看危机避险是否生效）
     print("\n=== 各 Barometer 模式：危机期空仓占比（验证避险）===")
     yrs = pd.Series(dates).dt.year.values
-    for mode in ["p1_only", "composite", "crisis_aware"]:
-        b = baro = barometer(mode, comp)
+    for mode in ["real", "p1_only", "composite", "crisis_aware"]:
+        b = get_barometer(mode, comp, b_real)
         a = defensive_rotation_alloc(b)
         line = f"  {mode:12s} Cash总占比={100*(a==2).mean():.1f}%"
         for y in [2018, 2020, 2022]:
@@ -232,7 +251,7 @@ def run():
         i0, i1 = idx[0], idx[-1]
         years = (dates[i1] - dates[i0]).days / 365.25
 
-        b_full = barometer(PRIMARY, comp)
+        b_full = get_barometer(PRIMARY, comp, b_real)
         dr_alloc = defensive_rotation_alloc(b_full)
         tr_alloc = tail_risk_alloc(b_full)
         dr_nav_full = portfolio_nav(dr_alloc, dr_assets, ["QLD", "XLU", "Cash"])
@@ -281,7 +300,7 @@ def run():
         fig.add_trace(go.Scatter(x=seg_dates, y=total_seg * 100, name="VTS Total Portfolio(等权)",
                                  line=dict(color="#d62728", width=2.5)))
         fig.update_layout(
-            title=f"反向工程 VTS 组合策略净值对比 ({wlabel.replace('_', '-')}, 起点=100, Barometer=p1_only)",
+            title=f"反向工程 VTS 组合策略净值对比 ({wlabel.replace('_', '-')}, 起点=100, Barometer=真实重建)",
             xaxis_title="日期", yaxis_title="净值 (起点=100)",
             template="plotly_white", height=640,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -301,8 +320,8 @@ def run():
     i0, i1 = idx[0], idx[-1]
     years = (dates[i1] - dates[i0]).days / 365.25
     spy_nav_full = np.concatenate([[1.0], np.cumprod(1.0 + spy_ret)])
-    for mode in ["p1_only", "composite", "crisis_aware"]:
-        b = barometer(mode, comp)
+    for mode in ["real", "p1_only", "composite", "crisis_aware"]:
+        b = get_barometer(mode, comp, b_real)
         dr_nav = portfolio_nav(defensive_rotation_alloc(b), dr_assets, ["QLD", "XLU", "Cash"])
         tr_nav = portfolio_nav(tail_risk_alloc(b), tr_assets, ["SSO", "IYR", "VIXM"])
         total = np.sqrt(dr_nav * tr_nav)

@@ -1,4 +1,5 @@
 Barometer模式,total_return_%,CAGR_%,max_drawdown_%,ret_dd_ratio
-p1_only,152.5,10.23,-40.51,3.76
-composite,656.33,23.7,-56.05,11.71
-crisis_aware,686.66,24.21,-61.49,11.17
+real,446.31,19.54,-48.42,9.22
+p1_only,168.55,10.94,-27.62,6.1
+composite,670.05,23.93,-54.55,12.28
+crisis_aware,664.18,23.83,-57.49,11.55
