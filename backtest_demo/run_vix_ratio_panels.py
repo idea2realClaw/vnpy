@@ -123,8 +123,9 @@ def main():
 
     fig.update_layout(
         title="VIX_ma3/VIX_ma30 比值二值 SPY 策略 · 收益曲线（参数：high_cash, thr=2.00）",
-        template="plotly_white", height=900,
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0),
+        template="plotly_white", height=920,
+        margin=dict(t=70, b=70),
+        legend=dict(orientation="h", yanchor="top", y=-0.06, xanchor="left", x=0),
     )
     path = f"{OUT_DIR}/vix_ratio_panels.html"
     plot_offline(fig, filename=path, auto_open=False)
