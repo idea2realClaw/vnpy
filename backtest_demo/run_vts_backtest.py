@@ -56,7 +56,7 @@ OUT_DIR = "/Users/zhuxiaodong/Documents/GitRepo/vnpy/backtest_demo"
 
 WINDOWS = {
     "2022_2026": (datetime(2022, 1, 3), datetime(2026, 7, 15)),
-    "2017_2026": (datetime(2017, 1, 3), datetime(2026, 7, 15)),
+    "2016_2026": (datetime(2016, 1, 4), datetime(2026, 7, 15)),
 }
 
 PRIMARY = "real"   # 主报告模式：真实反向工程 Barometer（含 VVIX+VIX9D，16 分量）
@@ -236,7 +236,7 @@ def run():
         b = get_barometer(mode, comp, b_real)
         a = defensive_rotation_alloc(b)
         line = f"  {mode:12s} Cash总占比={100*(a==2).mean():.1f}%"
-        for y in [2018, 2020, 2022]:
+        for y in [2016, 2018, 2020, 2022]:
             m = yrs == y
             line += f" | {y} Cash={100*(a[m]==2).mean():.0f}%"
         print(line)
@@ -312,11 +312,11 @@ def run():
         print(df.to_string(index=False))
         print(f"图表: {chart_path}")
 
-    # 多模式对比（仅 2017-2026 窗口，主表）
-    print("\n=== 多 Barometer 模式对比（2017-2026 窗口，Total Portfolio 等权）===")
+    # 多模式对比（仅 2016-2026 窗口，主表）
+    print("\n=== 多 Barometer 模式对比（2016-2026 窗口，Total Portfolio 等权）===")
     cmp_rows = []
-    idx = np.where((dates >= pd.Timestamp(WINDOWS["2017_2026"][0])) &
-                   (dates <= pd.Timestamp(WINDOWS["2017_2026"][1])))[0]
+    idx = np.where((dates >= pd.Timestamp(WINDOWS["2016_2026"][0])) &
+                   (dates <= pd.Timestamp(WINDOWS["2016_2026"][1])))[0]
     i0, i1 = idx[0], idx[-1]
     years = (dates[i1] - dates[i0]).days / 365.25
     spy_nav_full = np.concatenate([[1.0], np.cumprod(1.0 + spy_ret)])
