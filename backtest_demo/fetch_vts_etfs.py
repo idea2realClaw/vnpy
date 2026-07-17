@@ -34,6 +34,7 @@ END_DATE = datetime.now().strftime("%Y-%m-%d")
 # yfinance 代码 -> (vnpy symbol, exchange)
 ASSETS = {
     "^VIX": ("VIX", Exchange.SMART),   # 已存在，重跑仅延伸
+    "SPY": ("SPY", Exchange.SMART),    # 延伸到 2006（原仅 2016+），使 Barometer 全历史锚点可校验
     "QLD": ("QLD", Exchange.SMART),
     "XLU": ("XLU", Exchange.SMART),
     "IYR": ("IYR", Exchange.SMART),
