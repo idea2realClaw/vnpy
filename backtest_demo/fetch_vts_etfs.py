@@ -50,6 +50,9 @@ ASSETS = {
     # ^VIX9D = CBOE 9 日波动率指数（短窗口 vol，危机尖峰最陡）。VTS 13 指标之 #2；
     # 2011 才起，本地此前缺。补真实数据以补强 Barometer 顶部极端。
     "^VIX9D": ("VIX9D", Exchange.SMART),
+    # VTS1 轮动策略标的：
+    "XLP": ("XLP", Exchange.SMART),   # 必需消费 ETF（低波动防御档 <30%）
+    "VXX": ("VXX", Exchange.SMART),   # 波动率 ETN（>90% 做多波动率尾部对冲）
 }
 
 
