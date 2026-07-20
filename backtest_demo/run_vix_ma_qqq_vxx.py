@@ -5,7 +5,7 @@ run_vix_ma_qqq_vxx.py —— VIX_MA3/VIX_MA30 正向择时 QQQ，但「空仓」
 方向（正向，沿用策略一 VixMA3MA30Ratio 逻辑）：
     ratio >  thr -> 轮动到 VXX（恐慌期做多波动率）
     ratio <= thr -> 持有 QQQ（100%满仓）
-每次进入 VXX 至少连续持有 MIN_VXX_DAYS 天（沿用上一轮「最少5天」约束，只是把现金换成 VXX）。
+每次信号触发即持 VXX，无最少持有天数限制（逐日判定；此前版本曾设「进 VXX 至少5天」约束，已按用户要求去掉）。
 
 注意：VXX 数据从 2018-01-25 才有，故本回测窗口为 2018-2026（与 VIX/QQQ 的交集），
 显著短于原现金版（2011-2026）。为公平比较，同窗口也给出「现金版」与「QQQ 买入持有」基准。
@@ -26,8 +26,8 @@ from backtest_demo.run_vts_backtest import load_close
 
 OUT_DIR = "/Users/zhuxiaodong/Documents/GitRepo/vnpy/backtest_demo"
 
-# 进入 VXX 后至少连续持有天数（沿用上轮「空仓至少5天」约束，对象换成 VXX）
-MIN_VXX_DAYS = 5
+# 进入 VXX 后至少连续持有天数；用户要求去掉最少持有限制 -> 0（逐日判定）
+MIN_VXX_DAYS = 0
 
 # VIX 比值有效上限较高，覆盖 1.3~2.6
 THRS = [round(1.3 + 0.1 * i, 2) for i in range(0, 14)]  # 1.30..2.60
@@ -217,14 +217,14 @@ def main():
     )
     table_html = f"""
     <div class='panel'>
-      <h3>最近五个交易日 VIX 指标与仓位信号（thr={DTHR:.2f}；高比值→持VXX / 低比值→持QQQ；持VXX至少{MIN_VXX_DAYS}天）</h3>
+      <h3>最近五个交易日 VIX 指标与仓位信号（thr={DTHR:.2f}；高比值→持VXX / 低比值→持QQQ；无最少持有限制，逐日判定）</h3>
       <table>
         <thead><tr><th>日期</th><th>VIX</th><th>VIX_MA3</th><th>VIX_MA30</th>
         <th>VIX_MA3 / VIX_MA30</th><th>信号</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
       <p class='note'>VXX 数据自 2018-01-25 起，故本回测窗口为 <b>{FULL0} ~ {FULL1}</b>（受数据限制，短于原现金版的 2011-2026）。
-      判定：ratio &gt; {DTHR:.2f} → 轮动持 VXX；否则 100% 持 QQQ。每次进 VXX 至少连续 {MIN_VXX_DAYS} 天。</p>
+      判定：ratio &gt; {DTHR:.2f} → 轮动持 VXX；否则 100% 持 QQQ。<b>无最少持有天数限制（逐日判定）</b>。</p>
     </div>
     """
 
@@ -247,6 +247,7 @@ def main():
       <p class='note'>VXX 卖出持有本身长期大幅亏损（全样本 {xt*100:.1f}%，MDD {xdt*100:.1f}%），因波动率期货展期损耗。
       轮动策略仅在 VIX 比值突破 {DTHR:.2f} 的极端恐慌段短暂持有 VXX，意图捕获恐慌尖峰。VXX 持仓占比约 {vxx_frac*100:.1f}%。
       与<b>同窗口现金版</b>对照可见：恐慌期「反手做多 VXX」远胜「空仓」(全样本 {rt_*100:.1f}% vs {ct_*100:.1f}%)，因 COVID 等尖峰中 VXX 暴涨而现金仅避险。
+      <b>对比带「进 VXX 至少5天」约束的旧版（+1051.2%）：去掉约束后全样本降至 +796.0%</b>——因 COVID 尖峰中 VIX 比值在 2.0 上下反复，逐日判定会在比值回落日提前退出 VXX、少赚一段暴涨；5 天锁定反而吃满整段。说明该信号在尾部事件上「多看几天」更有利。
       <b>但须高度警惕：样本外 2021-2026（含 2022 熊市）比值从未&gt;{DTHR:.2f}，三种策略收益完全相同（{ro_*100:.1f}%），即轮动 VXX 在该段等于纯 QQQ 买入持有——全部超额收益来自 2018-2020、尤其是 2020-03 COVID 单次事件，属尾部集中、样本内驱动，并非稳健择时。</b></p>
     </div>
     """
@@ -293,7 +294,7 @@ def main():
         return plot_offline(fig, include_plotlyjs="cdn", output_type="div", auto_open=False)
 
     div = two_panel(nav_full, nav_oos, qqq_full, qqq_oos, cash_full, cash_oos,
-                    f"VIX_MA3/VIX_MA30 正向：恐慌期 QQQ↔VXX 轮动（thr={DTHR:.2f}，持VXX至少{MIN_VXX_DAYS}天）vs QQQ / 现金版")
+                    f"VIX_MA3/VIX_MA30 正向：恐慌期 QQQ↔VXX 轮动（thr={DTHR:.2f}，无最少持有限制）vs QQQ / 现金版")
 
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -312,7 +313,7 @@ def main():
   .note {{ color:#6b7280; font-size:12px; margin:8px 0 0; }}
 </style></head>
 <body>
-  <h2>VIX_MA3 / VIX_MA30 正向择时 QQQ —— 恐慌期轮动持 VXX（持VXX至少{MIN_VXX_DAYS}天）vs QQQ / 现金版</h2>
+  <h2>VIX_MA3 / VIX_MA30 正向择时 QQQ —— 恐慌期轮动持 VXX（无最少持有限制，逐日判定）vs QQQ / 现金版</h2>
   {table_html}
   {perf_html}
   {scan_html}
