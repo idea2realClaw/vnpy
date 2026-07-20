@@ -24,16 +24,46 @@ from backtest_demo.run_vts_backtest import load_close
 
 OUT_DIR = "/Users/zhuxiaodong/Documents/GitRepo/vnpy/backtest_demo"
 
+# 空仓至少连续天数（用户要求：每次触发空仓至少保持 5 天，避免反复进出）
+MIN_CASH_DAYS = 5
 
-def nav_inverse(thr, ratio, ret, valid):
-    """反方向 QQQ：ratio<=thr -> 空仓(0)，否则持有 QQQ(1)。返回 (nav, pos)。"""
-    n = len(ret)
+
+def enforce_min_cash(want_cash, min_days):
+    """want_cash[t]: 原始信号是否要求空仓(布尔)。返回 pos(1=持仓,0=空仓)，
+    并保证任一次空仓至少连续 min_days 天（到点若信号仍为空仓则顺延）。"""
+    n = len(want_cash)
     pos = np.ones(n)
+    cd = 0  # 剩余强制空仓天数
     for t in range(n):
-        if not valid[t] or np.isnan(ratio[t]):
-            pos[t] = 1.0
+        if cd > 0:
+            pos[t] = 0.0
+            cd -= 1
+            continue
+        if want_cash[t]:
+            pos[t] = 0.0
+            cd = min_days - 1
         else:
-            pos[t] = 0.0 if ratio[t] <= thr else 1.0
+            pos[t] = 1.0
+    return pos
+
+
+def nav_inverse(thr, ratio, ret, valid, min_days=0):
+    """反方向 QQQ：ratio<=thr -> 空仓(0)，否则持有 QQQ(1)。
+    若 min_days>0 则强制每次空仓至少连续 min_days 天。返回 (nav, pos)。"""
+    n = len(ret)
+    if min_days > 0:
+        want = np.array([
+            (valid[t] and not np.isnan(ratio[t]) and ratio[t] <= thr)
+            for t in range(n)
+        ])
+        pos = enforce_min_cash(want, min_days)
+    else:
+        pos = np.ones(n)
+        for t in range(n):
+            if not valid[t] or np.isnan(ratio[t]):
+                pos[t] = 1.0
+            else:
+                pos[t] = 0.0 if ratio[t] <= thr else 1.0
     nav = [100.0]
     for t in range(n):
         nav.append(nav[-1] * (1.0 + pos[t] * ret[t]))
@@ -84,7 +114,7 @@ def main():
     best = None
     allc = []
     for thr in thrs:
-        nav, pos = nav_inverse(thr, ratio, ret, valid)
+        nav, pos = nav_inverse(thr, ratio, ret, valid, MIN_CASH_DAYS)
         m = metrics(nav, dates, "2011-01-01", "2026-07-20")
         if m is None:
             continue
@@ -111,7 +141,7 @@ def main():
         print(f"\n  → 无真正触发空仓的档位，交付退回网格 rd 最优 thr={THR:.2f}（退化为买入持有 QQQ）")
 
     # ---- 选定阈值的净值 ----
-    nav, pos = nav_inverse(THR, ratio, ret, valid)
+    nav, pos = nav_inverse(THR, ratio, ret, valid, MIN_CASH_DAYS)
     qqq_nav = [100.0]
     for t in range(n):
         qqq_nav.append(qqq_nav[-1] * (1.0 + ret[t]))
@@ -153,13 +183,13 @@ def main():
     )
     table_html = f"""
     <div class='panel'>
-      <h3>最近五个交易日 VVIX 指标与仓位信号（反方向：阈值 thr={THR:.2f}；低比值→空仓 / 高比值→QQQ）</h3>
+      <h3>最近五个交易日 VVIX 指标与仓位信号（反方向：阈值 thr={THR:.2f}；低比值→空仓 / 高比值→QQQ；空仓至少{MIN_CASH_DAYS}天）</h3>
       <table>
         <thead><tr><th>日期</th><th>VVIX</th><th>VVIX_MA3</th><th>VVIX_MA30</th>
         <th>VVIX_MA3 / VVIX_MA30</th><th>信号</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
-      <p class='note'>信号判定：ratio &le; {THR:.2f} → 空仓；否则 100% 满仓 QQQ（逆向：平静期离场、恐慌飙升期买入）。</p>
+      <p class='note'>信号判定：ratio &le; {THR:.2f} → 空仓（至少连续 {MIN_CASH_DAYS} 天）；否则 100% 满仓 QQQ（逆向：平静期离场、恐慌飙升期买入）。</p>
     </div>
     """
 
@@ -178,7 +208,7 @@ def main():
     fig.add_trace(go.Scatter(x=oos_d, y=qqq_oos, name="QQQ 买入持有",
                              line=dict(color="#1f77b4", width=2), showlegend=False), row=2, col=1)
     fig.update_layout(
-        title="VVIX_MA3/VVIX_MA30 反方向二值择时（低比值→空仓 / 高比值→QQQ） vs QQQ 买入持有",
+        title="VVIX_MA3/VVIX_MA30 反方向二值择时（低比值→空仓 / 高比值→QQQ，空仓至少5天） vs QQQ 买入持有",
         template="plotly_white", height=860,
         legend=dict(orientation="h", yanchor="bottom", y=-0.10, xanchor="left", x=0),
         margin=dict(t=70, b=70),
@@ -208,7 +238,8 @@ def main():
               <td>{so*100:.1f}%</td><td>{sdo*100:.1f}%</td></tr>
         </tbody>
       </table>
-      <p class='note'>信号 t-1 日收盘算出 → 决定 t 日仓位（无日内前视）。方向：ratio 低于阈值→空仓，高于阈值→持有QQQ（逆向）。</p>
+      <p class='note'>信号 t-1 日收盘算出 → 决定 t 日仓位（无日内前视）。方向：ratio 低于阈值→空仓，高于阈值→持有QQQ（逆向）。
+      每次触发空仓强制至少连续 {MIN_CASH_DAYS} 天（到点若信号仍为空仓则顺延）。</p>
     </div>
     """
 
@@ -227,9 +258,9 @@ def main():
         <th>空仓占比</th><th>备注</th></tr></thead>
         <tbody>{scan_rows}</tbody>
       </table>
-      <p class='note'>本方向为逆向测试：低比值(平静)→空仓、高比值(恐慌)→买入QQQ。
-      因 VVIX 比值均值≈1.0、上限仅 {ratio_max:.2f}，高比值时段稀少且多处于崩盘途中，逆向买入往往买在下跌中段、反弹前尚未满仓；
-      任意阈值下<b>均远未跑赢 QQQ 买入持有</b>，多数档位收益显著更低（空仓错失牛市）。</p>
+      <p class='note'>本方向为逆向测试（空仓至少{MIN_CASH_DAYS}天）：低比值(平静)→空仓、高比值(恐慌)→买入QQQ。
+      多数有意义阈值（空仓&gt;5%，如交付 thr={THR:.2f}）仍<b>跑输 QQQ 买入持有</b>（空仓错失牛市）。
+      仅网格 rd 最优 thr=0.85 在 min-cash 下收益略高且回撤更低，但空仓仅≈2.3%（≈97.7% 时间满仓），属近退化、边缘样本内优势，不具稳健择时意义。</p>
     </div>
     """
 
@@ -250,7 +281,7 @@ def main():
   .note {{ color:#6b7280; font-size:12px; margin:8px 0 0; }}
 </style></head>
 <body>
-  <h2>VVIX 反方向二值择时策略（VVIX_MA3 / VVIX_MA30，thr={THR:.2f}；低比值→空仓 / 高比值→QQQ） vs QQQ 买入持有</h2>
+  <h2>VVIX 反方向二值择时策略（VVIX_MA3 / VVIX_MA30，thr={THR:.2f}，空仓至少{MIN_CASH_DAYS}天；低比值→空仓 / 高比值→QQQ） vs QQQ 买入持有</h2>
   {table_html}
   {perf_html}
   {scan_html}
