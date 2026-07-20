@@ -1,0 +1,14 @@
+因子,类别,数据来源,当前百分位%
+VIX_spot,level,VIX (真实),38.0
+VIX9D,level,VIX9D (真实),29.6
+VIX3M_VXV,level,VXV (真实),38.3
+VIX6M_VIXM,level,VIXM 中期期货ETF (代理 VXMT),7.1
+VVIX,level,VVIX (真实),53.3
+VIX_VIX3M_ratio,term,VIX/VXV (派生),32.5
+VIX9D_VIX_ratio,term,VIX9D/VIX (派生),13.7
+M1_M2_contango,term,VIX-VXV (代理 M1:M2),30.3
+VX30_VIX_rollyield,term,VIX-VIXM (代理 VX30:VIX),82.4
+Simple_VRP,vrp,VIX-HV20(SPY) (派生),38.0
+Traders_VRP,vrp,WMA(VXV-HV5) (代理 VX30-HV5),68.7
+Cash_VIX_Oscillator,cash,z(VIX vs SMA50) (派生),49.5
+VTS_Cash_VIX_Oscillator,cash,VIX-VXV 期限结构 (派生),30.3
