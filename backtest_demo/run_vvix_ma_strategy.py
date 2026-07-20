@@ -1,9 +1,9 @@
 """
 run_vvix_ma_strategy.py —— 第二个策略（与 VixMA3MA30Ratio 相互独立，不改方案一）
 
-合成：ratio = VVIX_MA3 / VVIX_MA60
+合成：ratio = VVIX_MA3 / VVIX_MA30
     VVIX_MA3  = VVIX 的 3 日移动平均（短期 vol-of-vol）
-    VVIX_MA60 = VVIX 的 60 日移动平均（长期 vol-of-vol）
+    VVIX_MA30 = VVIX 的 30 日移动平均（长期 vol-of-vol）
 方向（用户指定）：low → QQQ，high → Cash
     即 ratio > thr -> 空仓（VVIX 短期飙升=波动结构紧张，避险）
        ratio <= thr -> 持有 QQQ（100%满仓）
@@ -69,16 +69,17 @@ def main():
     v = VVIX.to_numpy(float)
 
     # ---- 平滑 ----
-    ma60 = pd.Series(v).rolling(60, min_periods=60).mean().to_numpy()
+    ma30 = pd.Series(v).rolling(30, min_periods=30).mean().to_numpy()
     ma3 = pd.Series(v).rolling(3, min_periods=3).mean().to_numpy()
-    ratio = ma3 / ma60  # 合成指标
+    ratio = ma3 / ma30  # 合成指标
 
     n = len(ret)
     dt = dates[:n]
     valid = ~np.isnan(ratio[:n]) & (dt >= np.datetime64("2011-01-01"))
 
     print(f"共同交易日: {len(dates)}  ({dates[0].astype('M8[D]')} ~ {dates[-1].astype('M8[D]')})")
-    print(f"ratio 范围: {np.nanmin(ratio):.2f} ~ {np.nanmax(ratio):.2f}  "
+    ratio_min, ratio_max = np.nanmin(ratio), np.nanmax(ratio)
+    print(f"ratio 范围: {ratio_min:.2f} ~ {ratio_max:.2f}  "
           f"(2011+ 有效均值 {np.nanmean(ratio[:n][valid]):.3f})")
 
     # ---- 网格搜索阈值（全样本 2011-2026，目标=收益/回撤比）----
@@ -100,12 +101,12 @@ def main():
     THR = best[1]
     print("\n=== 阈值网格搜索（全样本 2011-2026，目标=收益/回撤比）===")
     print(f"  网格 rd 最优 thr={best[1]:.2f}（收益={best[2]*100:.1f}% 空仓={best[4]*100:.1f}%）")
-    print("  注意：VVIX 比值有效上限仅 1.79，阈值≥1.70 时几乎从不触发(空仓≈0)，等价于直接买入持有 QQQ（退化）。")
+    print(f"  注意：VVIX_MA3/VVIX_MA30 比值有效上限仅 {ratio_max:.2f}，阈值≥该上限附近时几乎从不触发(空仓≈0)，等价于直接买入持有 QQQ（退化）。")
     print("  Top5:")
     for c in top5:
         print(f"    thr={c[1]:.2f}  tot={c[2]*100:.1f}%  MDD={c[3]*100:.1f}%  rd={c[0]:.2f}  cash={c[4]*100:.1f}%")
 
-    # 选用能真正触发信号的阈值（而非退化的 rd 最优）：VVIX 飙升→空仓，thr=1.30 覆盖约 1.5% 交易日（主要为 2020 等危机）
+    # 选用能真正触发信号的阈值（而非退化的 rd 最优）：VVIX 飙升→空仓，thr=1.30 覆盖最主要为 2020 等危机的交易日
     THR = 1.30
     print(f"\n  → 交付采用 thr={THR:.2f}（真正触发择时，非退化为买入持有）")
 
@@ -126,7 +127,7 @@ def main():
             "date": pd.Timestamp(dates[j]).strftime("%Y-%m-%d"),
             "vvix": v[j],
             "ma3": ma3[j],
-            "ma60": ma60[j],
+            "ma30": ma30[j],
             "ratio": r,
             "signal": sig,
         })
@@ -146,7 +147,7 @@ def main():
         return f"{x:.{d}f}"
     rows = "".join(
         f"<tr><td>{r['date']}</td><td>{fmt(r['vvix'])}</td><td>{fmt(r['ma3'])}</td>"
-        f"<td>{fmt(r['ma60'])}</td><td>{fmt(r['ratio'])}</td>"
+        f"<td>{fmt(r['ma30'])}</td><td>{fmt(r['ratio'])}</td>"
         f"<td class='{'cash' if r['signal']=='空仓' else 'full'}'>{r['signal']}</td></tr>"
         for r in last5
     )
@@ -154,8 +155,8 @@ def main():
     <div class='panel'>
       <h3>最近五个交易日 VVIX 指标与仓位信号（阈值 thr={THR:.2f}，方向：低于→QQQ / 高于→空仓）</h3>
       <table>
-        <thead><tr><th>日期</th><th>VVIX</th><th>VVIX_MA3</th><th>VVIX_MA60</th>
-        <th>VVIX_MA3 / VVIX_MA60</th><th>信号</th></tr></thead>
+        <thead><tr><th>日期</th><th>VVIX</th><th>VVIX_MA3</th><th>VVIX_MA30</th>
+        <th>VVIX_MA3 / VVIX_MA30</th><th>信号</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
       <p class='note'>信号判定：ratio &gt; {THR:.2f} → 空仓；否则 100% 满仓 QQQ。</p>
@@ -177,7 +178,7 @@ def main():
     fig.add_trace(go.Scatter(x=oos_d, y=qqq_oos, name="QQQ 买入持有",
                              line=dict(color="#1f77b4", width=2), showlegend=False), row=2, col=1)
     fig.update_layout(
-        title="VVIX_MA3/VVIX_MA60 二值择时（thr） vs QQQ 买入持有",
+        title="VVIX_MA3/VVIX_MA30 二值择时（thr） vs QQQ 买入持有",
         template="plotly_white", height=860,
         legend=dict(orientation="h", yanchor="bottom", y=-0.10, xanchor="left", x=0),
         margin=dict(t=70, b=70),
@@ -226,7 +227,7 @@ def main():
         <th>空仓占比</th><th>备注</th></tr></thead>
         <tbody>{scan_rows}</tbody>
       </table>
-      <p class='note'>VVIX 比值有效上限仅 1.79，故 thr≥1.70 几乎从不触发、等价于买入持有 QQQ（退化，rd 最高）。
+      <p class='note'>VVIX_MA3/VVIX_MA30 比值有效上限仅 {ratio_max:.2f}，故 thr≥该上限附近几乎从不触发、等价于买入持有 QQQ（退化，rd 最高）。
       本策略在任意阈值下<b>均未跑赢 QQQ 买入持有</b>，且各档最大回撤与 QQQ 同为 ≈−35.1%（信号滞后，减仓发生在下跌之后、反弹之前）。</p>
     </div>
     """
@@ -248,7 +249,7 @@ def main():
   .note {{ color:#6b7280; font-size:12px; margin:8px 0 0; }}
 </style></head>
 <body>
-  <h2>VVIX 比值二值择时策略（VVIX_MA3 / VVIX_MA60，thr={THR:.2f}） vs QQQ 买入持有</h2>
+  <h2>VVIX 比值二值择时策略（VVIX_MA3 / VVIX_MA30，thr={THR:.2f}） vs QQQ 买入持有</h2>
   {table_html}
   {perf_html}
   {scan_html}
@@ -262,7 +263,7 @@ def main():
 
     print(f"\n最近五日：")
     for r in last5:
-        print(f"  {r['date']}  VVIX={r['vvix']:.2f}  MA3={r['ma3']:.2f}  MA60={r['ma60']:.2f}  "
+        print(f"  {r['date']}  VVIX={r['vvix']:.2f}  MA3={r['ma3']:.2f}  MA30={r['ma30']:.2f}  "
               f"ratio={r['ratio']:.3f}  -> {r['signal']}")
     print(f"\n全样本收益：VVIX策略={mt*100:.1f}% (MDD {mdt*100:.1f}%)  QQQ={st*100:.1f}% (MDD {sdt*100:.1f}%)")
     print(f"样本外收益：VVIX策略={mo*100:.1f}% (MDD {mdo*100:.1f}%)  QQQ={so*100:.1f}% (MDD {sdo*100:.1f}%)")
